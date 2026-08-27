@@ -1,0 +1,25 @@
+# BT-7274 精简 Gemini 配置示例。
+# 未写出的 context、keybindings 和 MCP 字段使用程序默认值。
+
+config_version = 7
+current_provider = 0
+model = "gemini-2.5-flash"
+language = "zh"      # zh / en
+theme = "vanguard"  # vanguard / carbon / paper
+show_titan = false
+
+[[providers]]
+id = "provider-gemini"
+name = "Gemini"
+api_kind = "gemini_generate_content"
+models = ["gemini-2.5-flash"]
+api_key = "${GEMINI_API_KEY}"
+
+# 官方地址可省略；程序默认使用：
+# base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+[proxy]
+mode = "disabled" # disabled / http / socks5
+# url = "http://127.0.0.1:7890"
+# url = "socks5h://127.0.0.1:1080"
+# url = "${BT7274_PROXY_URL}"

@@ -1,0 +1,13 @@
+{
+  "name": "bt-7274-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:dev": "rspress dev",
+    "docs:build": "rspress build",
+    "docs:preview": "rspress preview"
+  },
+  "devDependencies": {
+    "@rspress/core": "2.0.20"
+  }
+}
