@@ -1,5 +1,7 @@
 /target
+/TODO.md
 /website/node_modules
 /website/doc_build
 /website/.rspress
+/website/.docusaurus
 /website/.npm-cache
