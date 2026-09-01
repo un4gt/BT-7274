@@ -1,13 +1,22 @@
 {
   "name": "bt-7274-docs",
   "private": true,
-  "type": "module",
   "scripts": {
-    "docs:dev": "rspress dev",
-    "docs:build": "rspress build",
-    "docs:preview": "rspress preview"
+    "docs:dev": "docusaurus start",
+    "docs:build": "docusaurus build --out-dir doc_build",
+    "docs:preview": "docusaurus serve --dir doc_build"
   },
-  "devDependencies": {
-    "@rspress/core": "2.0.20"
+  "dependencies": {
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "@easyops-cn/docusaurus-search-local": "0.55.3",
+    "@mdx-js/react": "3.1.1",
+    "clsx": "2.1.1",
+    "prism-react-renderer": "2.4.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "engines": {
+    "node": ">=20.0"
   }
 }

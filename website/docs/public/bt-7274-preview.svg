@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">BT-7274 终端聊天界面</title>
+  <desc id="desc">根据真实 BT-7274 截图绘制的 1920×1080 终端界面。</desc>
+  <style>
+    text {
+      font-family: "Cascadia Mono", "Microsoft YaHei", Consolas, monospace;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+    .border {
+      fill: none;
+      stroke: #24484b;
+      stroke-width: 1;
+    }
+    .label {
+      fill: #587477;
+    }
+    .muted {
+      fill: #486568;
+    }
+    .text {
+      fill: #a8b9ba;
+    }
+    .cyan {
+      fill: #18d6c5;
+    }
+    .orange {
+      fill: #ff9d23;
+    }
+    .divider {
+      stroke: #657779;
+      stroke-width: 1;
+    }
+  </style>
+
+  <rect width="1920" height="1080" fill="#061416"/>
+
+  <rect class="border" x="8.5" y="11.5" width="1903" height="44" rx="2"/>
+  <rect x="19" y="3" width="82" height="18" fill="#061416"/>
+  <text class="cyan" x="27" y="18">BT-7274</text>
+  <text class="orange" x="960" y="36" text-anchor="middle">新会话</text>
+  <rect x="13" y="48" width="43" height="18" fill="#061416"/>
+  <text class="label" x="16" y="63">会话</text>
+
+  <rect class="border" x="10.5" y="68.5" width="246" height="939" rx="1"/>
+  <rect x="13" y="61" width="89" height="18" fill="#061416"/>
+  <text class="label" x="16" y="78">历史会话</text>
+  <rect x="17" y="84" width="235" height="22" fill="#15383b"/>
+  <text class="text" x="18" y="101">❯</text>
+  <circle cx="39" cy="95" r="4.5" fill="#d5dfe0"/>
+  <text class="text" x="51" y="101">新会话</text>
+
+  <rect x="262" y="62" width="8" height="946" fill="#0a2023"/>
+  <path d="M266 73V997" stroke="#183b3e" stroke-width="1"/>
+
+  <rect class="border" x="274.5" y="78.5" width="1628" height="759" rx="2"/>
+
+  <text class="muted" x="16" y="916">r 重命名 · / 搜索 · d 删除</text>
+  <rect class="border" x="10.5" y="932.5" width="246" height="75" rx="1"/>
+  <rect x="13" y="924" width="68" height="18" fill="#061416"/>
+  <text class="label" x="16" y="941">⚙ 设置</text>
+  <text class="label" x="18" y="966">s 打开设置</text>
+
+  <rect class="border" x="274.5" y="858.5" width="1628" height="149" rx="2"/>
+  <rect x="274" y="850" width="52" height="18" fill="#061416"/>
+  <text class="cyan" x="278" y="867">输入</text>
+  <text class="cyan" x="1894" y="1012" text-anchor="end">enter 发送 · ctrl+o 换行 · Tab 侧栏</text>
+
+  <rect class="border" x="10.5" y="1028.5" width="1892" height="40" rx="1"/>
+  <rect x="17" y="1037" width="1880" height="24" fill="#0a1d20" stroke="#193a3d" stroke-width="1"/>
+  <text class="cyan" x="27" y="1056" font-weight="600">gpt-4o-mini [chat]</text>
+  <path class="divider" d="M202 1039v20"/>
+  <text class="text" x="218" y="1056">上下文 ~0+4.1k/?</text>
+  <path class="divider" d="M373 1039v20"/>
+  <text class="text" x="389" y="1056">速度 — tok/s</text>
+  <path class="divider" d="M509 1039v20"/>
+  <text class="label" x="525" y="1056">Ctrl+C 退出</text>
+</svg>

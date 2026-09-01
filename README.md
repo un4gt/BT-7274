@@ -47,7 +47,7 @@ $env:GEMINI_API_KEY = "你的 API Key"
 将以下内容保存到系统配置目录的 `bt-7274/config.toml`：
 
 ```toml
-config_version = 7
+config_version = 8
 current_provider = 0
 model = "gemini-2.5-flash"
 language = "zh"
@@ -70,7 +70,7 @@ mode = "disabled"
 
 ## 使用文档
 
-完整手册位于 [Rspress 文档站源码](website/docs/index.md)，包括安装、按键、配置、Provider、Gemini、
+完整手册位于 [Docusaurus 文档站源码](website/docs/index.md)，包括安装、按键、配置、Provider、Gemini、
 代理、日志、排错和开发参考。
 
 本地启动文档站：
