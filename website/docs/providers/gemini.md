@@ -7,7 +7,7 @@ BT-7274 直接实现 Gemini GenerateContent REST 协议，不通过 OpenAI 兼�
 ## 最小配置
 
 ```toml
-config_version = 7
+config_version = 8
 current_provider = 0
 model = "gemini-2.5-flash"
 language = "zh"

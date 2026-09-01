@@ -541,7 +541,7 @@ fn render_mcp(modal: &SettingsUi, area: Rect, frame: &mut Frame, ticks: u64, pal
             .take(visible_rows)
         {
             let is_selected = row == selected;
-            let snapshot = modal.mcp_statuses.get(&config.id);
+            let snapshot = modal.mcp_statuses.get(&config.name);
             let (status, marker, color) = if !config.enabled {
                 (
                     mcp_status_text(lang, McpServerStatus::Disabled),
@@ -652,12 +652,12 @@ fn render_mcp(modal: &SettingsUi, area: Rect, frame: &mut Frame, ticks: u64, pal
             .mcp_pos
             .min(modal.draft.mcp_servers.len().saturating_sub(1)),
     ) {
-        let snapshot = modal.mcp_statuses.get(&config.id);
-        let crate::config::McpTransportConfig::StreamableHttp { url, .. } = &config.transport;
-        let transport = format!("HTTP/SSE · {}", redacted_mcp_url(url));
+        let snapshot = modal.mcp_statuses.get(&config.name);
+        let transport = format!("HTTP/SSE · {}", redacted_mcp_url(&config.url));
+        let default_capabilities = Default::default();
         let capabilities = snapshot
             .map(|snapshot| &snapshot.capabilities)
-            .unwrap_or(&config.capabilities);
+            .unwrap_or(&default_capabilities);
         let implementation = match (&capabilities.server_name, &capabilities.server_version) {
             (Some(name), Some(version)) => format!("{name} {version}"),
             (Some(name), None) => name.clone(),
@@ -669,20 +669,18 @@ fn render_mcp(modal: &SettingsUi, area: Rect, frame: &mut Frame, ticks: u64, pal
             yes_no(capabilities.prompts, lang),
         );
         let labels = match lang {
-            Lang::Zh => ["名称", "ID", "Transport", "协议", "实现", "能力", "超时"],
+            Lang::Zh => ["名称", "Transport", "协议", "实现", "能力", "启动超时"],
             Lang::En => [
                 "Name",
-                "ID",
                 "Transport",
                 "Protocol",
                 "Server",
                 "Capabilities",
-                "Timeout",
+                "Startup timeout",
             ],
         };
         let values = [
             config.name.clone(),
-            config.id.clone(),
             transport,
             capabilities
                 .protocol_version
@@ -690,7 +688,7 @@ fn render_mcp(modal: &SettingsUi, area: Rect, frame: &mut Frame, ticks: u64, pal
                 .unwrap_or_else(|| "—".to_owned()),
             implementation,
             capability_text,
-            format!("{} s", config.timeout_seconds),
+            format!("{} s", config.startup_timeout_sec),
         ];
         for (index, (label, value)) in labels.iter().zip(values.iter()).enumerate() {
             if index as u16 >= details_inner.height {
@@ -721,7 +719,7 @@ fn render_mcp(modal: &SettingsUi, area: Rect, frame: &mut Frame, ticks: u64, pal
                 frame.buffer_mut(),
             );
         }
-        let mut next_y = details_inner.y.saturating_add(8);
+        let mut next_y = details_inner.y.saturating_add(7);
         if let Some(error) = snapshot.and_then(|snapshot| snapshot.error.as_deref())
             && next_y < details_inner.y.saturating_add(details_inner.height)
         {
@@ -1271,8 +1269,8 @@ fn render_mcp_wizard(frame: &mut Frame, wizard: &McpServerWizard, lang: Lang, pa
         (Lang::En, true) => "Edit Remote MCP Server",
     };
     let hint = match lang {
-        Lang::Zh => "Tab/↑/↓ 切换字段 · Enter 保存 · Esc 取消 · Secret 可使用 ${ENV_VAR}",
-        Lang::En => "Tab/↑/↓ Field · Enter Save · Esc Cancel · Secrets support ${ENV_VAR}",
+        Lang::Zh => "Tab/↑/↓ 切换字段 · Enter 保存 · Esc 取消 · Bearer 仅填环境变量名",
+        Lang::En => "Tab/↑/↓ Field · Enter Save · Esc Cancel · Bearer uses an env var name",
     };
     let area = popup_rect(frame.area(), 92, 28);
     Clear.render(area, frame.buffer_mut());
@@ -1290,20 +1288,20 @@ fn render_mcp_wizard(frame: &mut Frame, wizard: &McpServerWizard, lang: Lang, pa
 
     let labels: &[&str] = match lang {
         Lang::Zh => &[
-            "名称",
-            "ID",
+            "Server 名称",
             "URL",
-            "Headers JSON",
-            "Bearer Token",
-            "超时秒数",
+            "HTTP Headers",
+            "环境 Headers",
+            "Bearer 环境变量",
+            "启动超时秒数",
         ],
         Lang::En => &[
-            "Name",
-            "ID",
+            "Server name",
             "URL",
-            "Headers JSON",
-            "Bearer Token",
-            "Timeout sec",
+            "HTTP Headers",
+            "Env Headers",
+            "Bearer token env",
+            "Startup timeout",
         ],
     };
     let error_height = wizard.error.as_ref().map_or(0, |_| inner.height.min(3));

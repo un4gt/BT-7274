@@ -1,7 +1,7 @@
 # BT-7274 精简 Gemini 配置示例。
 # 未写出的 context、keybindings 和 MCP 字段使用程序默认值。
 
-config_version = 7
+config_version = 8
 current_provider = 0
 model = "gemini-2.5-flash"
 language = "zh"      # zh / en
@@ -23,3 +23,11 @@ mode = "disabled" # disabled / http / socks5
 # url = "http://127.0.0.1:7890"
 # url = "socks5h://127.0.0.1:1080"
 # url = "${BT7274_PROXY_URL}"
+
+# 远程 MCP 使用 Codex 风格命名表；Bearer 字段填写环境变量名，不写 ${...}。
+# [mcp_servers.docs]
+# url = "https://mcp.example.com/mcp"
+# bearer_token_env_var = "MCP_TOKEN"
+# http_headers = { "x-tenant" = "example" }
+# env_http_headers = { "x-api-key" = "MCP_API_KEY" }
+# startup_timeout_sec = 60

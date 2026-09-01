@@ -6,43 +6,49 @@ BT-7274 只支持 MCP Streamable HTTP Transport：
 
 - 客户端通过 HTTP(S) URL 建立远程连接。
 - 服务端响应可以是 `application/json`，也可以是 `text/event-stream`。
-- 支持 Bearer Token、自定义 Headers、完整 `${ENV_VAR}` 引用和全局代理。
+- 支持环境变量 Bearer Token、静态/环境变量 Headers 和全局代理。
 - 支持新增、编辑、删除、启停、连接、重连、状态展示和退出清理。
-- 初始化后保存协议版本、服务端名称/版本及 Resources/Prompts 能力标记。
+- 初始化后展示协议版本、服务端名称/版本及 Resources/Prompts 能力标记。
 
 不支持本地进程 Transport。MCP Runtime 当前也不会读取 Resources/Prompts 或调用任何远程
 能力；连接仅用于远程服务可达性和能力元数据管理。
 
 ## 配置
 
-推荐在“设置 -> MCP”中维护。对应 TOML：
+推荐在“设置 -> MCP”中维护。配置结构与 Codex CLI 一致：Server 名称就是
+`mcp_servers` 下的表键，HTTP 配置直接位于该表内，不再重复保存 `id`、展示名或
+`transport.kind`。完整字段命名可对照
+[OpenAI 的 Codex MCP 文档](https://learn.chatgpt.com/docs/extend/mcp)。
 
 ```toml
-[[mcp_servers]]
-id = "docs"
-name = "Documentation"
-enabled = true
-timeout_seconds = 60
-
-[mcp_servers.transport]
-kind = "streamable_http"
+[mcp_servers.docs]
 url = "https://mcp.example.com/mcp"
-auth_token = "${MCP_TOKEN}"
-headers = { "x-tenant" = "example" }
+enabled = true
+startup_timeout_sec = 60
+bearer_token_env_var = "MCP_TOKEN"
+http_headers = { "x-tenant" = "example" }
+env_http_headers = { "x-api-key" = "MCP_API_KEY" }
 ```
 
 字段约束：
 
-- `id` 以小写字母开头，只含小写字母、数字和下划线，最多 24 字符。
-- `name` 最多 128 字符。
-- `timeout_seconds` 范围为 1 到 3600 秒。
+- `docs` 是 Server 名称，不能为空、不能包含控制字符，最多 128 字符；名称重复会被拒绝。
 - `url` 必须是 HTTP(S) 地址，不能包含 userinfo 或 fragment。
-- `auth_token` 填写裸 token，客户端负责生成 `Authorization: Bearer ...`。
-- `headers` 不能覆盖 Authorization、Host、Content-Length、Accept、Content-Type、MCP
+- `enabled` 默认为 `true`。
+- `startup_timeout_sec` 默认为 `10`，范围为 1 到 3600 秒。
+- `bearer_token_env_var` 填写环境变量名，例如 `MCP_TOKEN`，不能填写 token 或
+  `${MCP_TOKEN}`。
+- `http_headers` 保存静态 Header；`env_http_headers` 的值是环境变量名。
+- 两类 Header 不能重名，也不能覆盖 Host、Content-Length、Accept、Content-Type、MCP
   Session 等协议保留字段。
+- `bearer_token_env_var` 与显式 `Authorization` Header 不能同时配置。
 
-`url`、`auth_token` 和 Header 值都可以使用完整环境变量引用，例如
-`${MCP_TOKEN}`。缺失变量只报告变量名，不输出配置值。
+MCP 配置只接受上述命名表结构。旧的 `[[mcp_servers]]`、`mcp_servers.transport`、
+`auth_token` 和 `timeout_seconds` 不做兼容解析。此结构对应 `config_version = 8`；旧版本
+配置会按全局配置策略备份，不会自动迁移。
+
+环境变量缺失时只报告变量名，不输出配置值。静态 Header 值、环境 Header 的解析值、URL
+query、Bearer Token 和代理凭据都会从运行时错误与日志中脱敏。
 
 ## 代理
 
@@ -77,8 +83,8 @@ MCP 使用应用的全局代理：
 - `failed`：配置、网络、协议或连接状态失败。
 - `stopping`：正在退出清理。
 
-失败详情经过长度限制和凭据脱敏后显示。URL query、Bearer Token、自定义 Header 与代理
-userinfo 中的凭据不会进入日志。
+失败详情经过长度限制和凭据脱敏后显示。能力元数据只保存在运行时状态中，不会写回
+`config.toml`。
 
 ## 诊断
 

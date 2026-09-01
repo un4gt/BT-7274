@@ -91,12 +91,16 @@ pub fn resolve_env_value(value: &str) -> Result<String, SecretResolveError> {
     let Some(name) = env_reference_name(value) else {
         return Ok(value.to_owned());
     };
+    resolve_env_variable(name)
+}
+
+pub(crate) fn resolve_env_variable(name: &str) -> Result<String, SecretResolveError> {
     std::env::var(name).map_err(|_| SecretResolveError {
         environment_variable: name.to_owned(),
     })
 }
 
-fn valid_env_name(name: &str) -> bool {
+pub(crate) fn valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('A'..='Z' | 'a'..='z' | '_'))
         && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())

@@ -6,7 +6,11 @@
 
 use color_eyre::eyre::{Context, ContextCompat, Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{MapAccess, Visitor},
+    ser::SerializeMap,
+};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -20,12 +24,12 @@ use uuid::Uuid;
 pub use crate::secret::{env_reference_name, is_sensitive_header};
 use crate::{
     i18n::Lang,
-    secret::{SecretValue, redact_url, resolve_env_value},
+    secret::{SecretValue, redact_url, resolve_env_value, valid_env_name},
     storage::atomic_write_private,
 };
 
 /// 当前写出的配置结构版本。缺少该字段的历史配置视为 v0。
-pub const CURRENT_CONFIG_VERSION: u32 = 7;
+pub const CURRENT_CONFIG_VERSION: u32 = 8;
 
 /// Provider 使用的原生 API 协议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -664,230 +668,264 @@ impl fmt::Display for ProxyValidationError {
 
 impl std::error::Error for ProxyValidationError {}
 
-/// MCP Server 初始化后持久化的能力快照。运行状态不写入配置，避免把
-/// `starting/failed` 一类瞬时状态误当作下次启动的事实。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// MCP Server 初始化后得到的运行时能力快照。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct McpCapabilityMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
-    #[serde(default)]
     pub resources: bool,
-    #[serde(default)]
     pub prompts: bool,
 }
 
 impl McpCapabilityMetadata {
-    fn normalize(&mut self) {
+    pub(crate) fn normalize(&mut self) {
         self.protocol_version = bounded_optional(self.protocol_version.take(), 64);
         self.server_name = bounded_optional(self.server_name.take(), 128);
         self.server_version = bounded_optional(self.server_version.take(), 64);
     }
 }
 
-/// MCP 连接方式。Secret 可以保存为完整环境变量引用，例如
-/// `auth_token = "${EXA_API_KEY}"`；解析只发生在运行时。
+/// 一个远程 Streamable HTTP MCP Server。
+///
+/// `name` 来自 `[mcp_servers.<name>]` 的表键，不在表内重复写出。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum McpTransportConfig {
-    StreamableHttp {
-        url: String,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        headers: BTreeMap<String, String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auth_token: Option<String>,
-    },
-}
-
-impl fmt::Debug for McpTransportConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::StreamableHttp {
-                url,
-                headers,
-                auth_token,
-            } => formatter
-                .debug_struct("StreamableHttp")
-                .field("url", &redact_url(url, true))
-                .field("header_names", &headers.keys().collect::<Vec<_>>())
-                .field("auth_token_configured", &auth_token.is_some())
-                .finish(),
-        }
-    }
-}
-
-impl Default for McpTransportConfig {
-    fn default() -> Self {
-        Self::StreamableHttp {
-            url: String::new(),
-            headers: BTreeMap::new(),
-            auth_token: None,
-        }
-    }
-}
-
-impl McpTransportConfig {
-    fn normalize(&mut self) {
-        match self {
-            Self::StreamableHttp {
-                url,
-                headers,
-                auth_token,
-            } => {
-                *url = url.trim().to_owned();
-                *auth_token = auth_token.as_deref().and_then(non_empty_trimmed);
-                *headers = std::mem::take(headers)
-                    .into_iter()
-                    .filter_map(|(name, value)| {
-                        let name = name.trim().to_ascii_lowercase();
-                        let value = value.trim().to_owned();
-                        (!name.is_empty() && !value.is_empty()).then_some((name, value))
-                    })
-                    .collect();
-            }
-        }
-    }
-}
-
-/// 一个独立持久化的 MCP Server。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
-    pub id: String,
+    #[serde(skip)]
     pub name: String,
-    #[serde(default = "default_true")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token_env_var: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub http_headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_http_headers: BTreeMap<String, String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
-    #[serde(default)]
-    pub transport: McpTransportConfig,
-    #[serde(default = "default_mcp_timeout_seconds")]
-    pub timeout_seconds: u64,
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub capabilities: McpCapabilityMetadata,
+    #[serde(
+        default = "default_mcp_startup_timeout_seconds",
+        skip_serializing_if = "is_default_mcp_startup_timeout_seconds"
+    )]
+    pub startup_timeout_sec: u64,
 }
 
-const fn default_mcp_timeout_seconds() -> u64 {
-    60
+impl fmt::Debug for McpServerConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("url", &redact_url(&self.url, true))
+            .field("bearer_token_env_var", &self.bearer_token_env_var)
+            .field(
+                "http_header_names",
+                &self.http_headers.keys().collect::<Vec<_>>(),
+            )
+            .field("env_http_headers", &self.env_http_headers)
+            .field("enabled", &self.enabled)
+            .field("startup_timeout_sec", &self.startup_timeout_sec)
+            .finish()
+    }
+}
+
+const fn default_mcp_startup_timeout_seconds() -> u64 {
+    10
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_default_mcp_startup_timeout_seconds(value: &u64) -> bool {
+    *value == default_mcp_startup_timeout_seconds()
 }
 
 impl McpServerConfig {
-    pub fn new(transport: McpTransportConfig) -> Self {
+    pub fn new() -> Self {
         Self {
-            id: new_mcp_server_id(),
-            name: "MCP Server".to_owned(),
+            name: "server".to_owned(),
+            url: "https://example.com/mcp".to_owned(),
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
             enabled: true,
-            transport,
-            timeout_seconds: default_mcp_timeout_seconds(),
-            capabilities: McpCapabilityMetadata::default(),
+            startup_timeout_sec: default_mcp_startup_timeout_seconds(),
         }
     }
 
     pub fn normalize(&mut self) {
-        self.id = self.id.trim().to_owned();
         self.name = self.name.trim().to_owned();
-        if self.name.is_empty() {
-            self.name = self.id.clone();
-        }
-        self.timeout_seconds = self.timeout_seconds.clamp(1, 3_600);
-        self.transport.normalize();
-        self.capabilities.normalize();
+        self.url = self.url.trim().to_owned();
+        self.bearer_token_env_var = self
+            .bearer_token_env_var
+            .take()
+            .as_deref()
+            .and_then(non_empty_trimmed);
+        self.http_headers = normalize_mcp_headers(std::mem::take(&mut self.http_headers));
+        self.env_http_headers = normalize_mcp_headers(std::mem::take(&mut self.env_http_headers));
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !valid_mcp_server_id(&self.id) {
-            bail!(
-                "MCP Server id {:?} 必须以小写字母开头，且只包含小写字母、数字或下划线（最多 24 字符）",
-                self.id
-            );
-        }
         if self.name.trim().is_empty()
             || self.name.chars().count() > 128
             || self.name.chars().any(char::is_control)
         {
-            bail!("MCP Server {:?} 的名称不能为空且最多 128 字符", self.id);
+            bail!("MCP Server 名称不能为空且最多 128 字符");
         }
-        if !(1..=3_600).contains(&self.timeout_seconds) {
-            bail!("MCP Server {:?} 的超时必须位于 1..=3600 秒", self.id);
+        if !(1..=3_600).contains(&self.startup_timeout_sec) {
+            bail!("MCP Server {:?} 的启动超时必须位于 1..=3600 秒", self.name);
         }
-        match &self.transport {
-            McpTransportConfig::StreamableHttp {
-                url,
-                headers,
-                auth_token,
-            } => {
-                if url.len() > 8_192 {
-                    bail!("MCP Server {:?} 的 URL 超出长度限制", self.id);
-                }
-                if env_reference_name(url).is_none() {
-                    let parsed = Url::parse(url)
-                        .with_context(|| format!("MCP Server {:?} 的 URL 无效", self.id))?;
-                    if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
-                        bail!("MCP Server {:?} 的 URL 必须是有效的 HTTP(S) 地址", self.id);
-                    }
-                    if !parsed.username().is_empty() || parsed.password().is_some() {
-                        bail!("MCP Server {:?} 的 URL 不能包含凭据", self.id);
-                    }
-                    if parsed.fragment().is_some() {
-                        bail!("MCP Server {:?} 的 URL 不能包含片段", self.id);
-                    }
-                }
-                if headers.len() > 128 {
-                    bail!("MCP Server {:?} 的 Header 条目过多", self.id);
-                }
-                for (name, value) in headers {
-                    if name.len() > 256 || value.len() > 32_768 {
-                        bail!("MCP Server {:?} 的 Header {name:?} 超出长度限制", self.id);
-                    }
-                    let parsed_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                        .with_context(|| {
-                            format!("MCP Server {:?} 的 Header {name:?} 无效", self.id)
-                        })?;
-                    reqwest::header::HeaderValue::from_str(value).with_context(|| {
-                        format!("MCP Server {:?} 的 Header {name:?} 值无效", self.id)
-                    })?;
-                    if matches!(
-                        parsed_name.as_str(),
-                        "authorization"
-                            | "host"
-                            | "content-length"
-                            | "transfer-encoding"
-                            | "connection"
-                            | "accept"
-                            | "content-type"
-                            | "mcp-protocol-version"
-                            | "mcp-session-id"
-                            | "last-event-id"
-                    ) {
-                        bail!("MCP Server {:?} 禁止覆盖 Header {name:?}", self.id);
-                    }
-                }
-                if auth_token.as_ref().is_some_and(|token| {
-                    token.len() > 32_768
-                        || token
-                            .chars()
-                            .any(|character| matches!(character, '\r' | '\n'))
-                }) {
-                    bail!("MCP Server {:?} 的 auth token 无效", self.id);
-                }
+        if self.url.len() > 8_192 {
+            bail!("MCP Server {:?} 的 URL 超出长度限制", self.name);
+        }
+        let parsed = Url::parse(&self.url)
+            .with_context(|| format!("MCP Server {:?} 的 URL 无效", self.name))?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
+            bail!(
+                "MCP Server {:?} 的 URL 必须是有效的 HTTP(S) 地址",
+                self.name
+            );
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            bail!("MCP Server {:?} 的 URL 不能包含凭据", self.name);
+        }
+        if parsed.fragment().is_some() {
+            bail!("MCP Server {:?} 的 URL 不能包含片段", self.name);
+        }
+        if self.http_headers.len() + self.env_http_headers.len() > 128 {
+            bail!("MCP Server {:?} 的 Header 条目过多", self.name);
+        }
+        for (name, value) in &self.http_headers {
+            validate_mcp_header(&self.name, name, value)?;
+            if env_reference_name(value).is_some() {
+                bail!(
+                    "MCP Server {:?} 的 Header {name:?} 如需读取环境变量，必须改用 env_http_headers",
+                    self.name
+                );
+            }
+        }
+        for (name, variable) in &self.env_http_headers {
+            validate_mcp_header_name(&self.name, name)?;
+            if !valid_env_name(variable) {
+                bail!(
+                    "MCP Server {:?} 的环境 Header {name:?} 必须引用有效的环境变量名",
+                    self.name
+                );
+            }
+            if self.http_headers.contains_key(name) {
+                bail!(
+                    "MCP Server {:?} 的 Header {name:?} 同时出现在 http_headers 和 env_http_headers",
+                    self.name
+                );
+            }
+        }
+        if let Some(variable) = &self.bearer_token_env_var {
+            if !valid_env_name(variable) {
+                bail!(
+                    "MCP Server {:?} 的 bearer_token_env_var 不是有效的环境变量名",
+                    self.name
+                );
+            }
+            if self.http_headers.contains_key("authorization")
+                || self.env_http_headers.contains_key("authorization")
+            {
+                bail!(
+                    "MCP Server {:?} 不能同时配置 bearer_token_env_var 和 Authorization Header",
+                    self.name
+                );
             }
         }
         Ok(())
     }
 }
 
-pub fn valid_mcp_server_id(id: &str) -> bool {
-    let mut chars = id.chars();
-    matches!(chars.next(), Some('a'..='z'))
-        && id.len() <= 24
-        && chars.all(|character| {
-            character == '_' || character.is_ascii_lowercase() || character.is_ascii_digit()
+fn normalize_mcp_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    headers
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim().to_owned();
+            (!name.is_empty() && !value.is_empty()).then_some((name, value))
         })
+        .collect()
 }
 
-fn new_mcp_server_id() -> String {
-    let random = Uuid::new_v4().simple().to_string();
-    format!("mcp_{}", &random[..12])
+fn validate_mcp_header(server: &str, name: &str, value: &str) -> Result<()> {
+    validate_mcp_header_name(server, name)?;
+    if value.len() > 32_768 {
+        bail!("MCP Server {server:?} 的 Header {name:?} 值超出长度限制");
+    }
+    reqwest::header::HeaderValue::from_str(value)
+        .with_context(|| format!("MCP Server {server:?} 的 Header {name:?} 值无效"))?;
+    Ok(())
+}
+
+fn validate_mcp_header_name(server: &str, name: &str) -> Result<()> {
+    if name.len() > 256 {
+        bail!("MCP Server {server:?} 的 Header {name:?} 名称超出长度限制");
+    }
+    let parsed_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+        .with_context(|| format!("MCP Server {server:?} 的 Header {name:?} 无效"))?;
+    if matches!(
+        parsed_name.as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "accept"
+            | "content-type"
+            | "mcp-protocol-version"
+            | "mcp-session-id"
+            | "last-event-id"
+    ) {
+        bail!("MCP Server {server:?} 禁止覆盖 Header {name:?}");
+    }
+    Ok(())
+}
+
+fn serialize_mcp_servers<S>(
+    servers: &Vec<McpServerConfig>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut map = serializer.serialize_map(Some(servers.len()))?;
+    for server in servers {
+        map.serialize_entry(&server.name, server)?;
+    }
+    map.end()
+}
+
+fn deserialize_mcp_servers<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<McpServerConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct McpServersVisitor;
+
+    impl<'de> Visitor<'de> for McpServersVisitor {
+        type Value = Vec<McpServerConfig>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a named MCP server table")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut servers = Vec::with_capacity(map.size_hint().unwrap_or_default());
+            while let Some((name, mut server)) = map.next_entry::<String, McpServerConfig>()? {
+                server.name = name;
+                servers.push(server);
+            }
+            Ok(servers)
+        }
+    }
+
+    deserializer.deserialize_map(McpServersVisitor)
 }
 
 fn bounded_optional(value: Option<String>, max_chars: usize) -> Option<String> {
@@ -1241,7 +1279,12 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "is_default")]
     pub context: ContextSettings,
     /// 独立持久化的 MCP Server；运行状态由 MCP Registry 管理。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_mcp_servers",
+        deserialize_with = "deserialize_mcp_servers"
+    )]
     pub mcp_servers: Vec<McpServerConfig>,
     /// 聊天编辑器可配置命令键。
     #[serde(default, skip_serializing_if = "is_default")]
@@ -1440,13 +1483,13 @@ impl Settings {
         if self.mcp_servers.len() > 64 {
             bail!("MCP Server 最多配置 64 个");
         }
-        let mut ids = HashSet::new();
+        let mut names = HashSet::new();
         for (index, server) in self.mcp_servers.iter().enumerate() {
             server
                 .validate()
                 .with_context(|| format!("第 {} 个 MCP Server 配置无效", index + 1))?;
-            if !ids.insert(server.id.as_str()) {
-                bail!("MCP Server id {:?} 重复", server.id);
+            if !names.insert(server.name.as_str()) {
+                bail!("MCP Server 名称 {:?} 重复", server.name);
             }
         }
         Ok(())
@@ -1664,26 +1707,60 @@ mod tests {
         let mut settings = Settings::default();
         settings.providers[0].api_key = Some(SecretValue::from("${OPENAI_API_KEY}"));
         settings.mcp_servers.push(McpServerConfig {
-            id: "docs".to_owned(),
-            name: "Docs".to_owned(),
+            name: "docs".to_owned(),
+            url: "https://mcp.example.com/mcp".to_owned(),
+            bearer_token_env_var: Some("MCP_TOKEN".to_owned()),
+            http_headers: BTreeMap::from([("x-tenant".to_owned(), "example".to_owned())]),
+            env_http_headers: BTreeMap::from([("x-api-key".to_owned(), "MCP_API_KEY".to_owned())]),
             enabled: true,
-            transport: McpTransportConfig::StreamableHttp {
-                url: "https://mcp.example.com/mcp".to_owned(),
-                headers: BTreeMap::from([("x-api-key".to_owned(), "${MCP_API_KEY}".to_owned())]),
-                auth_token: None,
-            },
-            timeout_seconds: 30,
-            capabilities: McpCapabilityMetadata::default(),
+            startup_timeout_sec: 30,
         });
         let raw = toml::to_string_pretty(&settings).unwrap();
         let parsed = Settings::from_toml(&raw).unwrap();
         assert_eq!(parsed, settings);
-        assert!(raw.contains("streamable_http"));
-        assert!(!raw.contains("stdio"));
+        assert!(raw.contains("[mcp_servers.docs]"));
+        assert!(raw.contains("bearer_token_env_var = \"MCP_TOKEN\""));
+        assert!(raw.contains("startup_timeout_sec = 30"));
+        assert!(!raw.contains("[[mcp_servers]]"));
+        assert!(!raw.contains("transport"));
         assert!(!raw.contains("[context]"));
         assert!(!raw.contains("[keybindings]"));
         assert!(!raw.contains("[providers.headers]"));
         assert!(!raw.contains("[providers.model_settings]"));
+    }
+
+    #[test]
+    fn mcp_defaults_and_environment_sources_follow_codex_shape() {
+        let mut settings = Settings::default();
+        let mut server = McpServerConfig::new();
+        server.name = "docs".to_owned();
+        settings.mcp_servers.push(server.clone());
+
+        let raw = toml::to_string_pretty(&settings).unwrap();
+        assert!(raw.contains("[mcp_servers.docs]"));
+        assert!(!raw.contains("startup_timeout_sec"));
+        assert!(!raw.contains("enabled ="));
+
+        server.bearer_token_env_var = Some("${MCP_TOKEN}".to_owned());
+        server.normalize();
+        assert!(server.validate().is_err());
+
+        server.bearer_token_env_var = None;
+        server
+            .http_headers
+            .insert("x-api-key".to_owned(), "${MCP_API_KEY}".to_owned());
+        server.normalize();
+        assert!(server.validate().is_err());
+
+        server.http_headers.clear();
+        server
+            .env_http_headers
+            .insert("x-api-key".to_owned(), "MCP_API_KEY".to_owned());
+        assert!(server.validate().is_ok());
+
+        server.startup_timeout_sec = 0;
+        server.normalize();
+        assert!(server.validate().is_err());
     }
 
     #[test]
@@ -1743,56 +1820,65 @@ mod tests {
     }
 
     #[test]
-    fn stdio_mcp_transport_is_not_deserializable() {
-        let raw = r#"
-kind = "stdio"
+    fn legacy_and_stdio_mcp_shapes_are_rejected() {
+        let legacy = format!(
+            r#"
+config_version = {CURRENT_CONFIG_VERSION}
+
+[[mcp_servers]]
+id = "docs"
+name = "Documentation"
+
+[mcp_servers.transport]
+kind = "streamable_http"
+url = "https://mcp.example.com/mcp"
+"#
+        );
+        assert!(Settings::from_toml(&legacy).is_err());
+
+        let duplicated_name = format!(
+            r#"
+config_version = {CURRENT_CONFIG_VERSION}
+
+[mcp_servers.docs]
+name = "Documentation"
+url = "https://mcp.example.com/mcp"
+"#
+        );
+        assert!(Settings::from_toml(&duplicated_name).is_err());
+
+        let stdio = r#"
 command = "node"
 args = []
 "#;
-        assert!(toml::from_str::<McpTransportConfig>(raw).is_err());
+        assert!(toml::from_str::<McpServerConfig>(stdio).is_err());
     }
 
     #[test]
-    fn mcp_http_validation_rejects_credentials_and_duplicate_ids() {
+    fn mcp_http_validation_rejects_credentials_and_duplicate_names() {
         let mut settings = Settings::default();
         let server = McpServerConfig {
-            id: "docs".to_owned(),
-            name: "Docs".to_owned(),
+            name: "docs".to_owned(),
+            url: "https://user:secret@mcp.example.com/mcp".to_owned(),
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
             enabled: true,
-            transport: McpTransportConfig::StreamableHttp {
-                url: "https://user:secret@mcp.example.com/mcp".to_owned(),
-                headers: BTreeMap::new(),
-                auth_token: None,
-            },
-            timeout_seconds: 30,
-            capabilities: Default::default(),
+            startup_timeout_sec: 30,
         };
         settings.mcp_servers.push(server);
         assert!(settings.validate_mcp_servers().is_err());
 
-        let transport = McpTransportConfig::StreamableHttp {
+        let server = McpServerConfig {
+            name: "docs".to_owned(),
             url: "https://mcp.example.com/mcp".to_owned(),
-            headers: BTreeMap::new(),
-            auth_token: None,
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            enabled: true,
+            startup_timeout_sec: 30,
         };
-        settings.mcp_servers = vec![
-            McpServerConfig {
-                id: "docs".to_owned(),
-                name: "One".to_owned(),
-                enabled: true,
-                transport: transport.clone(),
-                timeout_seconds: 30,
-                capabilities: Default::default(),
-            },
-            McpServerConfig {
-                id: "docs".to_owned(),
-                name: "Two".to_owned(),
-                enabled: true,
-                transport,
-                timeout_seconds: 30,
-                capabilities: Default::default(),
-            },
-        ];
+        settings.mcp_servers = vec![server.clone(), server];
         assert!(settings.validate_mcp_servers().is_err());
     }
 
@@ -1815,16 +1901,16 @@ args = []
         let mut settings = Settings::default();
         settings.providers[0].api_key = Some(SecretValue::from("provider-secret"));
         settings.mcp_servers.push(McpServerConfig {
-            id: "docs".to_owned(),
-            name: "Docs".to_owned(),
+            name: "docs".to_owned(),
+            url: "https://mcp.example.com/mcp?token=query-secret".to_owned(),
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::from([
+                ("x-api-key".to_owned(), "header-secret".to_owned()),
+                ("authorization".to_owned(), "bearer-secret".to_owned()),
+            ]),
+            env_http_headers: BTreeMap::new(),
             enabled: true,
-            transport: McpTransportConfig::StreamableHttp {
-                url: "https://mcp.example.com/mcp?token=query-secret".to_owned(),
-                headers: BTreeMap::from([("x-api-key".to_owned(), "header-secret".to_owned())]),
-                auth_token: Some("bearer-secret".to_owned()),
-            },
-            timeout_seconds: 30,
-            capabilities: Default::default(),
+            startup_timeout_sec: 30,
         });
         let debug = format!("{settings:?}");
         for secret in [

@@ -15,7 +15,7 @@ BT-7274 使用 TOML 配置。程序启动时读取一次配置，不监听文件
 ## 最小 Gemini 配置
 
 ```toml
-config_version = 7
+config_version = 8
 current_provider = 0
 model = "gemini-2.5-flash"
 language = "zh"
@@ -40,7 +40,7 @@ mode = "disabled"
 
 | 字段 | 说明 |
 | --- | --- |
-| `config_version` | 必须等于当前程序要求的版本；当前为 `7` |
+| `config_version` | 必须等于当前程序要求的版本；当前为 `8` |
 | `providers` | Provider 数组，至少保留一个 |
 | `current_provider` | 当前 Provider 在数组中的下标，从 `0` 开始 |
 | `model` | 当前模型，必须属于当前 Provider 的模型列表 |
@@ -50,7 +50,7 @@ mode = "disabled"
 | `proxy` | 所有 Provider 请求共用的代理 |
 | `context` | 可选的上下文预算与自动压缩设置 |
 | `keybindings` | 可选的聊天编辑器快捷键 |
-| `mcp_servers` | 可选的远程 Streamable HTTP MCP 连接 |
+| `mcp_servers` | 以 Server 名称为键的远程 Streamable HTTP MCP 表 |
 
 ## 可选默认项
 
@@ -78,13 +78,16 @@ copy = "alt+c"
 
 ## 环境变量引用
 
-API Key、代理 URL、MCP Token 与自定义 Header 值可以使用完整的 `${ENV_VAR}` 形式：
+API Key 与代理 URL 可以使用完整的 `${ENV_VAR}` 形式：
 
 ```toml
 api_key = "${GEMINI_API_KEY}"
 ```
 
 引用只在运行时解析，配置文件仍保存变量名。推荐用这种方式避免凭据直接落盘。
+
+MCP 遵循 Codex 风格：`bearer_token_env_var` 和 `env_http_headers` 直接填写环境变量名，
+不使用 `${...}` 包装。详见 [MCP 远程连接](/mcp)。
 
 ## 配置版本
 

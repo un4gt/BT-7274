@@ -20,10 +20,10 @@ use rmcp::{
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
-    config::{McpCapabilityMetadata, McpServerConfig, McpTransportConfig, ProxySettings},
+    config::{McpCapabilityMetadata, McpServerConfig, ProxySettings},
     event::{AppEvent, Event},
     runtime::task::CancellationToken,
-    secret::{SecretRedactor, resolve_env_value},
+    secret::{SecretRedactor, resolve_env_variable},
 };
 
 const MCP_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -42,7 +42,6 @@ pub enum McpServerStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerSnapshot {
-    pub id: String,
     pub name: String,
     pub status: McpServerStatus,
     pub generation: u64,
@@ -52,7 +51,10 @@ pub struct McpServerSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpRuntimeEvent {
-    Changed { server_id: String, generation: u64 },
+    Changed {
+        server_name: String,
+        generation: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -127,10 +129,9 @@ impl McpRegistry {
                 let generation = state.next_generation;
                 let shutdown = CancellationToken::new();
                 state.servers.insert(
-                    config.id.clone(),
+                    config.name.clone(),
                     ServerEntry {
                         snapshot: McpServerSnapshot {
-                            id: config.id.clone(),
                             name: config.name.clone(),
                             status: if config.enabled {
                                 McpServerStatus::Starting
@@ -138,14 +139,14 @@ impl McpRegistry {
                                 McpServerStatus::Disabled
                             },
                             generation,
-                            capabilities: config.capabilities.clone(),
+                            capabilities: McpCapabilityMetadata::default(),
                             error: None,
                         },
                         shutdown: shutdown.clone(),
                         task: None,
                     },
                 );
-                changed.push((config.id.clone(), generation));
+                changed.push((config.name.clone(), generation));
                 if config.enabled {
                     launches.push((config, proxy.clone(), generation, shutdown));
                 }
@@ -154,14 +155,14 @@ impl McpRegistry {
         for (config, proxy, generation, shutdown) in launches {
             self.spawn_actor(config, proxy, generation, shutdown);
         }
-        for (server_id, generation) in changed {
-            self.emit_changed(server_id, generation);
+        for (server_name, generation) in changed {
+            self.emit_changed(server_name, generation);
         }
     }
 
     pub fn reconnect(&self, config: McpServerConfig, proxy: ProxySettings) -> Result<(), String> {
         if !config.enabled {
-            return Err(format!("MCP Server {:?} is disabled", config.id));
+            return Err(format!("MCP Server {:?} is disabled", config.name));
         }
         config.validate().map_err(|error| format!("{error:#}"))?;
         let (generation, shutdown) = {
@@ -169,7 +170,7 @@ impl McpRegistry {
             if state.shutting_down {
                 return Err("MCP Registry is shutting down".to_owned());
             }
-            if let Some(mut old) = state.servers.remove(&config.id) {
+            if let Some(mut old) = state.servers.remove(&config.name) {
                 old.shutdown.cancel();
                 if let Some(task) = old.task.take() {
                     state.retired.push(task);
@@ -179,14 +180,13 @@ impl McpRegistry {
             let generation = state.next_generation;
             let shutdown = CancellationToken::new();
             state.servers.insert(
-                config.id.clone(),
+                config.name.clone(),
                 ServerEntry {
                     snapshot: McpServerSnapshot {
-                        id: config.id.clone(),
                         name: config.name.clone(),
                         status: McpServerStatus::Starting,
                         generation,
-                        capabilities: config.capabilities.clone(),
+                        capabilities: McpCapabilityMetadata::default(),
                         error: None,
                     },
                     shutdown: shutdown.clone(),
@@ -196,7 +196,7 @@ impl McpRegistry {
             (generation, shutdown)
         };
         self.spawn_actor(config.clone(), proxy, generation, shutdown);
-        self.emit_changed(config.id, generation);
+        self.emit_changed(config.name, generation);
         Ok(())
     }
 
@@ -204,14 +204,14 @@ impl McpRegistry {
         self.lock_state()
             .servers
             .iter()
-            .map(|(id, entry)| (id.clone(), entry.snapshot.clone()))
+            .map(|(name, entry)| (name.clone(), entry.snapshot.clone()))
             .collect()
     }
 
-    pub fn snapshot(&self, server_id: &str) -> Option<McpServerSnapshot> {
+    pub fn snapshot(&self, server_name: &str) -> Option<McpServerSnapshot> {
         self.lock_state()
             .servers
-            .get(server_id)
+            .get(server_name)
             .map(|entry| entry.snapshot.clone())
     }
 
@@ -260,14 +260,14 @@ impl McpRegistry {
         shutdown: CancellationToken,
     ) {
         let registry = self.clone();
-        let server_id = config.id.clone();
+        let server_name = config.name.clone();
         let task = tokio::spawn(async move {
             server_actor(registry, config, proxy, generation, shutdown).await;
         });
         let mut state = self.lock_state();
         if let Some(entry) = state
             .servers
-            .get_mut(&server_id)
+            .get_mut(&server_name)
             .filter(|entry| entry.snapshot.generation == generation)
         {
             entry.task = Some(task);
@@ -276,11 +276,16 @@ impl McpRegistry {
         }
     }
 
-    fn set_connected(&self, server_id: &str, generation: u64, capabilities: McpCapabilityMetadata) {
+    fn set_connected(
+        &self,
+        server_name: &str,
+        generation: u64,
+        capabilities: McpCapabilityMetadata,
+    ) {
         let mut state = self.lock_state();
         let Some(entry) = state
             .servers
-            .get_mut(server_id)
+            .get_mut(server_name)
             .filter(|entry| entry.snapshot.generation == generation)
         else {
             return;
@@ -289,14 +294,14 @@ impl McpRegistry {
         entry.snapshot.capabilities = capabilities;
         entry.snapshot.error = None;
         drop(state);
-        self.emit_changed(server_id.to_owned(), generation);
+        self.emit_changed(server_name.to_owned(), generation);
     }
 
-    fn set_failed(&self, server_id: &str, generation: u64, error: String) {
+    fn set_failed(&self, server_name: &str, generation: u64, error: String) {
         let mut state = self.lock_state();
         let Some(entry) = state
             .servers
-            .get_mut(server_id)
+            .get_mut(server_name)
             .filter(|entry| entry.snapshot.generation == generation)
         else {
             return;
@@ -304,15 +309,15 @@ impl McpRegistry {
         entry.snapshot.status = McpServerStatus::Failed;
         entry.snapshot.error = Some(error);
         drop(state);
-        self.emit_changed(server_id.to_owned(), generation);
+        self.emit_changed(server_name.to_owned(), generation);
     }
 
-    fn emit_changed(&self, server_id: String, generation: u64) {
+    fn emit_changed(&self, server_name: String, generation: u64) {
         let _ =
             self.inner
                 .events
                 .send(Event::App(AppEvent::McpRuntime(McpRuntimeEvent::Changed {
-                    server_id,
+                    server_name,
                     generation,
                 })));
     }
@@ -343,24 +348,24 @@ async fn server_actor(
     generation: u64,
     shutdown: CancellationToken,
 ) {
-    tracing::info!(server = %config.id, transport = "streamable_http", "MCP Server 开始连接");
+    tracing::info!(server = %config.name, transport = "streamable_http", "MCP Server 开始连接");
     let mut service = match connect_server(&config, &proxy, &shutdown).await {
         Ok(service) => service,
         Err(error) => {
             let error = redact_runtime_error(&error, &config, &proxy);
-            tracing::error!(server = %config.id, error = %error, "MCP Server 连接失败");
-            registry.set_failed(&config.id, generation, error);
+            tracing::error!(server = %config.name, error = %error, "MCP Server 连接失败");
+            registry.set_failed(&config.name, generation, error);
             return;
         }
     };
 
     let Some(peer) = service.peer_info() else {
         let error = "MCP initialize response did not include peer metadata".to_owned();
-        registry.set_failed(&config.id, generation, error);
+        registry.set_failed(&config.name, generation, error);
         close_service(&mut service).await;
         return;
     };
-    let capabilities = McpCapabilityMetadata {
+    let mut capabilities = McpCapabilityMetadata {
         protocol_version: Some(peer.protocol_version.as_str().to_owned()),
         server_name: peer
             .server_info
@@ -373,8 +378,9 @@ async fn server_actor(
         resources: peer.capabilities.resources.is_some(),
         prompts: peer.capabilities.prompts.is_some(),
     };
-    registry.set_connected(&config.id, generation, capabilities);
-    tracing::info!(server = %config.id, "MCP Server 已连接");
+    capabilities.normalize();
+    registry.set_connected(&config.name, generation, capabilities);
+    tracing::info!(server = %config.name, "MCP Server 已连接");
 
     let mut health = tokio::time::interval(Duration::from_millis(250));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -385,9 +391,9 @@ async fn server_actor(
             _ = health.tick() => {
                 if service.is_closed() {
                     registry.set_failed(
-                        &config.id,
+                        &config.name,
                         generation,
-                        format!("MCP Server {:?} transport closed unexpectedly", config.id),
+                        format!("MCP Server {:?} transport closed unexpectedly", config.name),
                     );
                     break;
                 }
@@ -395,7 +401,7 @@ async fn server_actor(
         }
     }
     close_service(&mut service).await;
-    tracing::info!(server = %config.id, "MCP Server 连接已关闭");
+    tracing::info!(server = %config.name, "MCP Server 连接已关闭");
 }
 
 async fn connect_server(
@@ -403,18 +409,20 @@ async fn connect_server(
     proxy: &ProxySettings,
     shutdown: &CancellationToken,
 ) -> Result<ClientService, String> {
-    let timeout = Duration::from_secs(config.timeout_seconds);
-    let McpTransportConfig::StreamableHttp {
-        url,
-        headers,
-        auth_token,
-    } = &config.transport;
-    let resolved_url = resolve_env_value(url).map_err(|error| error.to_string())?;
+    let timeout = Duration::from_secs(config.startup_timeout_sec);
+    let resolved_url = config.url.clone();
     let mut resolved_headers = HashMap::new();
-    for (name, value) in headers {
+    for (name, value) in &config.http_headers {
         let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| format!("invalid MCP HTTP Header name {name:?}"))?;
-        let resolved = resolve_env_value(value).map_err(|error| error.to_string())?;
+        let value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|_| format!("invalid MCP HTTP Header value for {name:?}"))?;
+        resolved_headers.insert(name, value);
+    }
+    for (name, variable) in &config.env_http_headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("invalid MCP HTTP Header name {name:?}"))?;
+        let resolved = resolve_env_variable(variable).map_err(|error| error.to_string())?;
         let value = reqwest::header::HeaderValue::from_str(&resolved)
             .map_err(|_| format!("invalid MCP HTTP Header value for {name:?}"))?;
         resolved_headers.insert(name, value);
@@ -422,9 +430,9 @@ async fn connect_server(
     let mut transport_config = StreamableHttpClientTransportConfig::with_uri(resolved_url)
         .custom_headers(resolved_headers)
         .reinit_on_expired_session(true);
-    if let Some(token) = auth_token {
+    if let Some(variable) = &config.bearer_token_env_var {
         transport_config = transport_config
-            .auth_header(resolve_env_value(token).map_err(|error| error.to_string())?);
+            .auth_header(resolve_env_variable(variable).map_err(|error| error.to_string())?);
     }
     let client = build_http_client(proxy)?;
     let transport = StreamableHttpClientTransport::with_client(client, transport_config);
@@ -480,17 +488,19 @@ async fn close_service(service: &mut ClientService) {
 
 fn redact_runtime_error(error: &str, config: &McpServerConfig, proxy: &ProxySettings) -> String {
     let mut redactor = SecretRedactor::new();
-    let McpTransportConfig::StreamableHttp {
-        url,
-        headers,
-        auth_token,
-    } = &config.transport;
-    redactor.add_url(url, true);
-    for value in headers.values() {
+    redactor.add_url(&config.url, true);
+    for value in config.http_headers.values() {
         redactor.add_configured(value);
     }
-    if let Some(token) = auth_token {
-        redactor.add_configured(token);
+    for variable in config.env_http_headers.values() {
+        if let Ok(value) = resolve_env_variable(variable) {
+            redactor.add_configured(&value);
+        }
+    }
+    if let Some(variable) = &config.bearer_token_env_var
+        && let Ok(value) = resolve_env_variable(variable)
+    {
+        redactor.add_configured(&value);
     }
     if let Some(proxy_url) = proxy.url.as_ref() {
         redactor.add_url(proxy_url, false);
@@ -507,29 +517,26 @@ mod tests {
         net::{TcpListener, TcpStream},
     };
 
-    fn http_config(id: &str, url: String) -> McpServerConfig {
+    fn http_config(name: &str, url: String) -> McpServerConfig {
         McpServerConfig {
-            id: id.to_owned(),
-            name: id.to_owned(),
+            name: name.to_owned(),
+            url,
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
             enabled: true,
-            transport: McpTransportConfig::StreamableHttp {
-                url,
-                headers: BTreeMap::new(),
-                auth_token: None,
-            },
-            timeout_seconds: 2,
-            capabilities: Default::default(),
+            startup_timeout_sec: 2,
         }
     }
 
     #[test]
     fn runtime_errors_redact_remote_and_proxy_credentials() {
         let config = McpServerConfig {
-            transport: McpTransportConfig::StreamableHttp {
-                url: "https://mcp.example/mcp?api_key=query-secret".to_owned(),
-                headers: BTreeMap::from([("x-api-key".to_owned(), "header-secret".to_owned())]),
-                auth_token: Some("bearer-secret".to_owned()),
-            },
+            url: "https://mcp.example/mcp?api_key=query-secret".to_owned(),
+            http_headers: BTreeMap::from([
+                ("x-api-key".to_owned(), "header-secret".to_owned()),
+                ("authorization".to_owned(), "bearer-secret".to_owned()),
+            ]),
             ..http_config("exa", "https://mcp.example/mcp".to_owned())
         };
         let proxy = ProxySettings {

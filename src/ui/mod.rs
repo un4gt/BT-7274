@@ -119,7 +119,7 @@ mod tests {
             ConversationOverlay, Focus, LineEdit, ModelsSection, RecoveryState, SettingsCategory,
             SettingsPane,
         },
-        config::{ApiKind, McpServerConfig, McpTransportConfig, Provider, Settings, Theme},
+        config::{ApiKind, McpServerConfig, Provider, Settings, Theme},
         runtime::{
             context::prepare_compaction,
             conversation::{Message, MessageStatus, Session},
@@ -372,16 +372,13 @@ mod tests {
     async fn mcp_settings_and_wizard_are_narrow_safe_redacted_and_single_cursor() {
         let mut settings = Settings::default();
         settings.mcp_servers.push(McpServerConfig {
-            id: "docs".to_owned(),
-            name: "Documentation".to_owned(),
+            name: "docs".to_owned(),
+            url: "https://example.com/mcp".to_owned(),
+            bearer_token_env_var: None,
+            http_headers: Default::default(),
+            env_http_headers: Default::default(),
             enabled: false,
-            transport: McpTransportConfig::StreamableHttp {
-                url: "https://example.com/mcp".to_owned(),
-                headers: Default::default(),
-                auth_token: None,
-            },
-            timeout_seconds: 30,
-            capabilities: Default::default(),
+            startup_timeout_sec: 30,
         });
         let mut app = App::new(settings, vec![Session::new()]);
         app.focus = Focus::Sidebar;
@@ -398,8 +395,8 @@ mod tests {
             .unwrap();
         {
             let wizard = app.modal.as_mut().unwrap().mcp_wizard.as_mut().unwrap();
-            wizard.auth_token = LineEdit::from_text("mcp-secret-value");
-            wizard.field = 4;
+            wizard.http_headers = LineEdit::from_text(r#"{"x-api-key":"mcp-secret-value"}"#);
+            wizard.field = 2;
         }
         draw_sizes(&app);
 

@@ -2,8 +2,8 @@
 
 use crate::clipboard;
 use crate::config::{
-    ApiKind, KeyBinding, KeyBindings, McpServerConfig, McpTransportConfig, ModelSelection,
-    ModelSettings, Provider, ProxySettings, Settings, name_from_url,
+    ApiKind, KeyBinding, KeyBindings, McpServerConfig, ModelSelection, ModelSettings, Provider,
+    ProxySettings, Settings, name_from_url,
 };
 use crate::editor::ChatEditor;
 use crate::event::{AppEvent, Event, EventHandler};
@@ -480,31 +480,29 @@ pub struct McpServerWizard {
     pub step: u8,
     pub field: usize,
     pub name: LineEdit,
-    pub id: LineEdit,
     pub url: LineEdit,
-    pub headers: LineEdit,
-    pub auth_token: LineEdit,
+    pub http_headers: LineEdit,
+    pub env_http_headers: LineEdit,
+    pub bearer_token_env_var: LineEdit,
     pub timeout: LineEdit,
     enabled: bool,
-    capabilities: crate::config::McpCapabilityMetadata,
     pub error: Option<String>,
 }
 
 impl McpServerWizard {
     fn new() -> Self {
-        let config = McpServerConfig::new(McpTransportConfig::default());
+        let config = McpServerConfig::new();
         Self {
             edit_index: None,
             step: 1,
             field: 0,
             name: LineEdit::from_text(&config.name),
-            id: LineEdit::from_text(&config.id),
-            url: LineEdit::from_text("https://example.com/mcp"),
-            headers: LineEdit::from_text("{}"),
-            auth_token: LineEdit::default(),
-            timeout: LineEdit::from_text(&config.timeout_seconds.to_string()),
+            url: LineEdit::from_text(&config.url),
+            http_headers: LineEdit::from_text("{}"),
+            env_http_headers: LineEdit::from_text("{}"),
+            bearer_token_env_var: LineEdit::default(),
+            timeout: LineEdit::from_text(&config.startup_timeout_sec.to_string()),
             enabled: true,
-            capabilities: Default::default(),
             error: None,
         }
     }
@@ -513,20 +511,17 @@ impl McpServerWizard {
         let mut wizard = Self::new();
         wizard.edit_index = Some(index);
         wizard.name = LineEdit::from_text(&config.name);
-        wizard.id = LineEdit::from_text(&config.id);
-        wizard.timeout = LineEdit::from_text(&config.timeout_seconds.to_string());
-        wizard.enabled = config.enabled;
-        wizard.capabilities = config.capabilities.clone();
-        let McpTransportConfig::StreamableHttp {
-            url,
-            headers,
-            auth_token,
-        } = &config.transport;
-        wizard.url = LineEdit::from_text(url);
-        wizard.headers = LineEdit::from_text(
-            &serde_json::to_string(headers).unwrap_or_else(|_| "{}".to_owned()),
+        wizard.url = LineEdit::from_text(&config.url);
+        wizard.http_headers = LineEdit::from_text(
+            &serde_json::to_string(&config.http_headers).unwrap_or_else(|_| "{}".to_owned()),
         );
-        wizard.auth_token = LineEdit::from_text(auth_token.as_deref().unwrap_or_default());
+        wizard.env_http_headers = LineEdit::from_text(
+            &serde_json::to_string(&config.env_http_headers).unwrap_or_else(|_| "{}".to_owned()),
+        );
+        wizard.bearer_token_env_var =
+            LineEdit::from_text(config.bearer_token_env_var.as_deref().unwrap_or_default());
+        wizard.timeout = LineEdit::from_text(&config.startup_timeout_sec.to_string());
+        wizard.enabled = config.enabled;
         wizard
     }
 
@@ -541,10 +536,10 @@ impl McpServerWizard {
     pub fn line(&self, field: usize) -> &LineEdit {
         match field {
             0 => &self.name,
-            1 => &self.id,
-            2 => &self.url,
-            3 => &self.headers,
-            4 => &self.auth_token,
+            1 => &self.url,
+            2 => &self.http_headers,
+            3 => &self.env_http_headers,
+            4 => &self.bearer_token_env_var,
             _ => &self.timeout,
         }
     }
@@ -552,43 +547,45 @@ impl McpServerWizard {
     fn line_mut(&mut self, field: usize) -> &mut LineEdit {
         match field {
             0 => &mut self.name,
-            1 => &mut self.id,
-            2 => &mut self.url,
-            3 => &mut self.headers,
-            4 => &mut self.auth_token,
+            1 => &mut self.url,
+            2 => &mut self.http_headers,
+            3 => &mut self.env_http_headers,
+            4 => &mut self.bearer_token_env_var,
             _ => &mut self.timeout,
         }
     }
 
     pub fn sensitive_field(&self, field: usize) -> bool {
-        matches!(field, 3 | 4)
+        field == 2
     }
 
     fn build_config(&self) -> Result<McpServerConfig, String> {
-        let timeout_seconds = self
+        let startup_timeout_sec = self
             .timeout
             .text()
             .trim()
             .parse::<u64>()
             .map_err(|_| "MCP timeout must be an integer number of seconds".to_owned())?;
-        let headers = parse_json_or_default::<BTreeMap<String, String>>(
-            &self.headers.text(),
+        let http_headers = parse_json_or_default::<BTreeMap<String, String>>(
+            &self.http_headers.text(),
             BTreeMap::new(),
         )
-        .map_err(|error| format!("Invalid Headers JSON: {error}"))?;
-        let auth_token = self.auth_token.text();
-        let transport = McpTransportConfig::StreamableHttp {
-            url: self.url.text(),
-            headers,
-            auth_token: (!auth_token.trim().is_empty()).then(|| auth_token.trim().to_owned()),
-        };
+        .map_err(|error| format!("Invalid HTTP Headers JSON: {error}"))?;
+        let env_http_headers = parse_json_or_default::<BTreeMap<String, String>>(
+            &self.env_http_headers.text(),
+            BTreeMap::new(),
+        )
+        .map_err(|error| format!("Invalid environment Headers JSON: {error}"))?;
+        let bearer_token_env_var = self.bearer_token_env_var.text();
         let mut config = McpServerConfig {
-            id: self.id.text(),
             name: self.name.text(),
+            url: self.url.text(),
+            bearer_token_env_var: (!bearer_token_env_var.trim().is_empty())
+                .then(|| bearer_token_env_var.trim().to_owned()),
+            http_headers,
+            env_http_headers,
             enabled: self.enabled,
-            transport,
-            timeout_seconds,
-            capabilities: self.capabilities.clone(),
+            startup_timeout_sec,
         };
         config.normalize();
         config.validate().map_err(|error| format!("{error:#}"))?;
@@ -1696,44 +1693,18 @@ impl App {
 
     fn on_mcp_runtime(&mut self, event: McpRuntimeEvent) {
         let McpRuntimeEvent::Changed {
-            server_id,
+            server_name,
             generation,
         } = event;
-        let Some(snapshot) = self.mcp_registry.snapshot(&server_id) else {
+        let Some(snapshot) = self.mcp_registry.snapshot(&server_name) else {
             return;
         };
         if snapshot.generation != generation {
             return;
         }
 
-        let mut metadata_changed = false;
-        if snapshot.status == McpServerStatus::Connected
-            && let Some(server) = self
-                .settings
-                .mcp_servers
-                .iter_mut()
-                .find(|server| server.id == server_id)
-            && server.capabilities != snapshot.capabilities
-        {
-            server.capabilities = snapshot.capabilities.clone();
-            metadata_changed = true;
-        }
         if let Some(modal) = self.modal.as_mut() {
-            modal
-                .mcp_statuses
-                .insert(server_id.clone(), snapshot.clone());
-            if snapshot.status == McpServerStatus::Connected
-                && let Some(server) = modal
-                    .draft
-                    .mcp_servers
-                    .iter_mut()
-                    .find(|server| server.id == server_id)
-            {
-                server.capabilities = snapshot.capabilities.clone();
-            }
-        }
-        if metadata_changed {
-            self.persist_settings();
+            modal.mcp_statuses.insert(server_name, snapshot);
         }
     }
 
@@ -2924,7 +2895,7 @@ impl App {
         let plain = !key_event
             .modifiers
             .intersects(KeyModifiers::CONTROL.union(KeyModifiers::ALT));
-        let mut reconnect_id = None;
+        let mut reconnect_name = None;
         {
             let Some(modal) = self.modal.as_mut() else {
                 return;
@@ -2956,7 +2927,7 @@ impl App {
                 KeyCode::Char('d' | 'D') if plain && server_count > 0 => {
                     let index = modal.mcp_pos.min(server_count - 1);
                     let removed = modal.draft.mcp_servers.remove(index);
-                    modal.mcp_statuses.remove(&removed.id);
+                    modal.mcp_statuses.remove(&removed.name);
                     modal.mcp_pos = modal
                         .mcp_pos
                         .min(modal.draft.mcp_servers.len().saturating_sub(1));
@@ -2969,9 +2940,9 @@ impl App {
                     modal.validation_error = None;
                 }
                 KeyCode::Char('c' | 'C' | 'r' | 'R') if plain && server_count > 0 => {
-                    reconnect_id = Some(
+                    reconnect_name = Some(
                         modal.draft.mcp_servers[modal.mcp_pos.min(server_count - 1)]
-                            .id
+                            .name
                             .clone(),
                     );
                 }
@@ -2979,14 +2950,14 @@ impl App {
             }
         }
 
-        let Some(server_id) = reconnect_id else {
+        let Some(server_name) = reconnect_name else {
             return;
         };
         let result = self
             .settings
             .mcp_servers
             .iter()
-            .find(|server| server.id == server_id)
+            .find(|server| server.name == server_name)
             .cloned()
             .ok_or_else(|| "Save this MCP Server before connecting".to_owned())
             .and_then(|config| {
@@ -3028,19 +2999,21 @@ impl App {
                             .iter()
                             .enumerate()
                             .any(|(index, server)| {
-                                Some(index) != wizard.edit_index && server.id == config.id
+                                Some(index) != wizard.edit_index && server.name == config.name
                             });
                     if duplicate {
-                        wizard.error =
-                            Some(format!("MCP Server id {:?} is already in use", config.id));
+                        wizard.error = Some(format!(
+                            "MCP Server name {:?} is already in use",
+                            config.name
+                        ));
                         return;
                     }
-                    let id = config.id.clone();
+                    let name = config.name.clone();
                     let index = if let Some(index) = wizard.edit_index {
-                        let old_id = modal.draft.mcp_servers[index].id.clone();
+                        let old_name = modal.draft.mcp_servers[index].name.clone();
                         modal.draft.mcp_servers[index] = config;
-                        if old_id != id {
-                            modal.mcp_statuses.remove(&old_id);
+                        if old_name != name {
+                            modal.mcp_statuses.remove(&old_name);
                         }
                         index
                     } else {
@@ -4334,7 +4307,7 @@ mod tests {
         );
         {
             let wizard = app.modal.as_mut().unwrap().mcp_wizard.as_mut().unwrap();
-            wizard.field = 2;
+            wizard.field = 1;
             wizard.url.clear();
         }
         app.handle_paste("https://example.com/mcp".to_owned());
