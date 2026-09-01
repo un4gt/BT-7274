@@ -664,7 +664,9 @@ fn render_mcp(modal: &SettingsUi, area: Rect, frame: &mut Frame, ticks: u64, pal
             _ => "—".to_owned(),
         };
         let capability_text = format!(
-            "resources={} · prompts={}",
+            "tools={} ({}) · resources={} · prompts={}",
+            yes_no(capabilities.tools, lang),
+            capabilities.tool_count,
             yes_no(capabilities.resources, lang),
             yes_no(capabilities.prompts, lang),
         );

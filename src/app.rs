@@ -1713,6 +1713,19 @@ impl App {
             ModelStreamEvent::AssistantTextDelta { text } => self.on_delta(stream, text),
             ModelStreamEvent::ReasoningDelta { text } => self.on_reasoning(stream, text),
             ModelStreamEvent::System { message } => self.on_system_event(stream, message),
+            ModelStreamEvent::ToolCall {
+                call_id,
+                server,
+                name,
+                arguments,
+            } => self.on_tool_call(stream, call_id, server, name, arguments),
+            ModelStreamEvent::ToolResult {
+                call_id,
+                server,
+                name,
+                output,
+                is_error,
+            } => self.on_tool_result(stream, call_id, server, name, output, is_error),
             ModelStreamEvent::Completed {
                 usage,
                 stop_reason,
@@ -1791,6 +1804,51 @@ impl App {
             false
         };
         if updated {
+            self.mark_stream_dirty(stream);
+        }
+    }
+
+    fn on_tool_call(
+        &mut self,
+        stream: u64,
+        call_id: String,
+        server: String,
+        name: String,
+        arguments: serde_json::Value,
+    ) {
+        let Some((session_id, selection)) = self.active_stream_target(stream) else {
+            return;
+        };
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            stream_message_mut(session, selection).push_tool_call(call_id, server, name, arguments);
+            self.mark_stream_dirty(stream);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_tool_result(
+        &mut self,
+        stream: u64,
+        call_id: String,
+        server: String,
+        name: String,
+        output: serde_json::Value,
+        is_error: bool,
+    ) {
+        let Some((session_id, selection)) = self.active_stream_target(stream) else {
+            return;
+        };
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            stream_message_mut(session, selection)
+                .push_tool_result(call_id, server, name, output, is_error);
             self.mark_stream_dirty(stream);
         }
     }
@@ -2045,6 +2103,31 @@ impl App {
             return;
         }
         match text.trim() {
+            "/models" => {
+                self.editor.clear();
+                let active = self
+                    .open_session()
+                    .default_model
+                    .as_ref()
+                    .filter(|selection| self.settings.selection_available(selection))
+                    .cloned()
+                    .unwrap_or_else(|| self.settings.default_selection());
+                self.picker = Some(ModelPicker::new(
+                    &self.settings,
+                    active,
+                    PickerMode::SessionDefault,
+                ));
+                return;
+            }
+            "/mcp" => {
+                self.editor.clear();
+                let mut modal = SettingsUi::new(self.settings.clone());
+                modal.category = SettingsCategory::Mcp;
+                modal.pane = SettingsPane::Content;
+                modal.mcp_statuses = self.mcp_registry.snapshots();
+                self.modal = Some(modal);
+                return;
+            }
             "/compact" => {
                 self.editor.clear();
                 self.open_compaction_preview();
@@ -2229,6 +2312,7 @@ impl App {
             self.settings.context.clone(),
             compacted_context,
             history,
+            self.mcp_registry.clone(),
             stream_id,
             cancellation,
             sender,
@@ -4422,5 +4506,34 @@ mod tests {
             assert_eq!(app.search_results(query), vec![0], "query: {query}");
         }
         assert!(app.search_results("absent").is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_models_and_mcp_open_existing_lists_without_sending_messages() {
+        let mut app = test_app();
+        let original_messages = app.open_session().messages.len();
+
+        app.editor.set_text("/models");
+        app.submit();
+        assert!(app.editor.text().is_empty());
+        assert!(matches!(
+            app.picker.as_ref().map(|picker| picker.mode),
+            Some(PickerMode::SessionDefault)
+        ));
+        assert_eq!(app.open_session().messages.len(), original_messages);
+
+        app.picker = None;
+        app.editor.set_text("/mcp");
+        app.submit();
+        assert!(app.editor.text().is_empty());
+        assert!(matches!(
+            app.modal.as_ref(),
+            Some(SettingsUi {
+                category: SettingsCategory::Mcp,
+                pane: SettingsPane::Content,
+                ..
+            })
+        ));
+        assert_eq!(app.open_session().messages.len(), original_messages);
     }
 }

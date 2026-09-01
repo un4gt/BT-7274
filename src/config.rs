@@ -676,6 +676,8 @@ pub struct McpCapabilityMetadata {
     pub server_version: Option<String>,
     pub resources: bool,
     pub prompts: bool,
+    pub tools: bool,
+    pub tool_count: usize,
 }
 
 impl McpCapabilityMetadata {

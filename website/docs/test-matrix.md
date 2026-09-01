@@ -25,8 +25,10 @@
 - Unicode token 估算、预算溢出、压缩摘要、apply/undo 和生成中消息保护。
 - Cancellation Token、Esc/Ctrl+C 优先级、request id、TTFT 与输出 token 指标。
 - 四种 Provider 的正文、reasoning、usage、完成原因、错误和提前断流。
+- Chat Completions、Responses、Gemini 的工具定义编码、流式工具调用解析与结果回送。
 - SSE 注释、空行、拆包、心跳、非法 JSON 和连接中断。
-- MCP Streamable HTTP initialize、JSON 响应、能力摘要、配置重连、脱敏和有界关闭。
+- MCP Streamable HTTP initialize、`tools/list`、`tools/call`、能力摘要、配置重连、脱敏、取消
+  和有界关闭。
 
 ## 持久化测试
 
@@ -34,7 +36,7 @@
 - 临时文件完成写入和同步后原子替换，目录中不遗留临时文件。
 - 单个损坏会话不影响其他会话加载。
 - streaming 消息重启后可继续、保留或丢弃。
-- 会话 JSON roundtrip 保留 Provider/Model/参数、reasoning、系统事件和终态。
+- 会话 JSON roundtrip 保留 Provider/Model/参数、reasoning、系统事件、工具片段和终态。
 
 ## TUI 渲染测试
 
@@ -59,6 +61,9 @@
 | 流中途断开 | 保留部分回复并标记 failed |
 | 会话 JSON 截断 | 隔离损坏文件 |
 | MCP initialize 超时 | 仅对应 Server 标记 failed |
+| MCP tools/list 失败 | 对应 Server 标记 failed，不暴露半成品工具目录 |
+| MCP tools/call 失败 | 错误结果回送模型，其他 Server 与 TUI 继续运行 |
+| 模型反复调用工具 | 8 轮或单轮 16 调用上限触发 Protocol Error |
 | MCP 连接意外关闭 | 状态变为 failed，可手动重连 |
 | MCP 配置变更 | 旧 generation 状态不能覆盖新连接 |
 | 应用退出 | 恢复终端并有界关闭网络任务 |

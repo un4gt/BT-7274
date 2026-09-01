@@ -8,10 +8,13 @@ BT-7274 只支持 MCP Streamable HTTP Transport：
 - 服务端响应可以是 `application/json`，也可以是 `text/event-stream`。
 - 支持环境变量 Bearer Token、静态/环境变量 Headers 和全局代理。
 - 支持新增、编辑、删除、启停、连接、重连、状态展示和退出清理。
-- 初始化后展示协议版本、服务端名称/版本及 Resources/Prompts 能力标记。
+- 初始化后执行分页 `tools/list`，并展示协议版本、服务端名称/版本、工具数量及
+  Resources/Prompts 能力标记。
+- Chat Completions、Responses 和 Gemini GenerateContent 会把已连接 Server 的工具提供给
+  模型，并执行模型返回的 `tools/call`。
 
-不支持本地进程 Transport。MCP Runtime 当前也不会读取 Resources/Prompts 或调用任何远程
-能力；连接仅用于远程服务可达性和能力元数据管理。
+不支持本地进程 Transport。Resources 和 Prompts 目前只展示能力标记，不读取其内容。
+Anthropic Messages 尚未接入 MCP 工具调用。
 
 ## 配置
 
@@ -19,6 +22,7 @@ BT-7274 只支持 MCP Streamable HTTP Transport：
 `mcp_servers` 下的表键，HTTP 配置直接位于该表内，不再重复保存 `id`、展示名或
 `transport.kind`。完整字段命名可对照
 [OpenAI 的 Codex MCP 文档](https://learn.chatgpt.com/docs/extend/mcp)。
+也可以在聊天输入框输入 `/mcp` 直接打开该列表。
 
 ```toml
 [mcp_servers.docs]
@@ -67,8 +71,9 @@ MCP 使用应用的全局代理：
 1. 取消并退休旧连接任务。
 2. 校验并解析新配置。
 3. 在超时范围内完成 MCP initialize。
-4. 将状态更新为 `connected` 或 `failed`。
-5. 监测连接是否意外关闭。
+4. 若 Server 声明 Tools 能力，在同一启动超时内完成分页 `tools/list`。
+5. 将状态和工具目录更新为 `connected`，或在任一步失败时标记为 `failed`。
+6. 接收模型运行时发来的 `tools/call`，并持续监测连接是否意外关闭。
 
 用户重连时遵循同一流程。旧 generation 的迟到事件会被忽略。
 
@@ -86,6 +91,21 @@ MCP 使用应用的全局代理：
 失败详情经过长度限制和凭据脱敏后显示。能力元数据只保存在运行时状态中，不会写回
 `config.toml`。
 
+## 工具调用
+
+连接成功的工具会生成稳定模型别名。别名只包含 ASCII 字母、数字、`_`、`-`，最多 64
+字符，并包含 Server 名和稳定哈希后缀，从而实际避免不同 Server 的同名工具冲突。调用时
+Runtime 再把别名映射回远端原名。
+
+一次回复最多允许 8 个工具轮次，每轮最多 16 个调用。单次 `tools/call` 最长 60 秒，结果
+上限为 256 KiB。远端工具错误会作为 `is_error` 结果返回模型，让模型有机会解释或改用其
+他工具；用户取消、整体模型超时和应用退出会取消整条调用链。工具参数和结果不会写入日
+志，但会作为独立的会话片段展示并在持久化前脱敏。
+
+单个 Server 和单次模型请求最多各暴露 128 个工具；单个 input schema 最大 64 KiB。工具
+调用由模型在生成期间自动发起，不提供逐次确认弹窗，因此只应配置你信任且权限范围合适
+的 MCP Server。
+
 ## 诊断
 
 PowerShell：
@@ -102,10 +122,13 @@ cargo run --release
 - `URL 必须是有效的 HTTP(S) 地址`：填写完整 scheme、host 和路径。
 - `initialize exceeded ... seconds`：检查远程服务、代理和超时设置。
 - `transport closed unexpectedly`：服务端主动断开或中间网络连接被关闭，可在设置页重连。
+- `tools/list failed`：Server 声明了 Tools 能力，但工具目录不符合协议或网络请求失败。
+- 工具已连接但模型不调用：确认当前协议是 Chat Completions、Responses 或 Gemini，并且
+  所选模型本身支持 function calling。
 - HTTP 能返回但初始化失败：确认目标路径是 MCP Streamable HTTP 端点，而不是普通 REST
   或网页地址。
 
 ## 测试边界
 
-本地 mock 覆盖 JSON initialize、能力摘要、状态变更、凭据脱敏和有界关闭。真实 Server 的
-JSON/SSE、代理和鉴权组合仍应记录在发布 smoke matrix 中。
+本地 mock 覆盖 JSON initialize、分页工具发现、实际工具调用、能力摘要、状态变更、凭据
+脱敏和有界关闭。真实 Server 的 JSON/SSE、代理和鉴权组合仍应记录在发布 smoke matrix 中。

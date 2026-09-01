@@ -13,6 +13,7 @@ use crate::{
         CapabilitySupport, ModelCapabilities, ModelParameters, Provider, ProxySettings,
         ReasoningSettings,
     },
+    runtime::tool::{ToolCall, ToolDefinition, ToolRound},
     session::{Message, Role},
 };
 
@@ -62,7 +63,16 @@ async fn stream_generate_content(
             }),
         );
     }
+    append_gemini_tool_rounds(&mut contents, request.tool_rounds);
     let mut body = serde_json::json!({ "contents": contents });
+    if !request.tools.is_empty() {
+        object_mut(&mut body)?.insert(
+            "tools".to_owned(),
+            serde_json::json!([{
+                "functionDeclarations": gemini_tools(request.tools),
+            }]),
+        );
+    }
     apply_parameters(&mut body, &request.settings.parameters)?;
     apply_extra_body(&mut body, &request.settings.parameters.extra_body);
     let mut endpoint = model_endpoint(&transport, request.model, "streamGenerateContent")?;
@@ -102,6 +112,74 @@ fn gemini_contents(history: &[Message]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn gemini_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut declaration = serde_json::json!({
+                "name": tool.model_name,
+                "parameters": tool.input_schema,
+            });
+            if let Some(description) = &tool.description {
+                declaration["description"] = Value::String(description.clone());
+            }
+            declaration
+        })
+        .collect()
+}
+
+fn append_gemini_tool_rounds(contents: &mut Vec<Value>, rounds: &[ToolRound]) {
+    for round in rounds {
+        if let Some(state) = round
+            .provider_state
+            .as_ref()
+            .filter(|state| state.is_object())
+        {
+            contents.push(state.clone());
+        } else {
+            let calls = round
+                .calls
+                .iter()
+                .map(|call| {
+                    let mut function_call = serde_json::json!({
+                        "name": call.name,
+                        "args": call.arguments,
+                    });
+                    if let Some(provider_id) = &call.provider_id {
+                        function_call["id"] = Value::String(provider_id.clone());
+                    }
+                    serde_json::json!({ "functionCall": function_call })
+                })
+                .collect::<Vec<_>>();
+            contents.push(serde_json::json!({ "role": "model", "parts": calls }));
+        }
+
+        let results = round
+            .results
+            .iter()
+            .map(|result| {
+                let mut function_response = serde_json::json!({
+                    "name": result.name,
+                    "response": {
+                        "output": result.output,
+                        "isError": result.is_error,
+                    },
+                });
+                if let Some(provider_id) = round
+                    .calls
+                    .iter()
+                    .find(|call| call.id == result.call_id)
+                    .and_then(|call| call.provider_id.as_ref())
+                {
+                    function_response["id"] = Value::String(provider_id.clone());
+                }
+                serde_json::json!({ "functionResponse": function_response })
+            })
+            .collect::<Vec<_>>();
+        contents.push(serde_json::json!({ "role": "user", "parts": results }));
+    }
 }
 
 fn apply_parameters(body: &mut Value, parameters: &ModelParameters) -> Result<()> {
@@ -147,6 +225,8 @@ fn model_endpoint(
 struct GeminiStreamState {
     usage: Option<Usage>,
     stop_reason: Option<StopReason>,
+    tool_calls: Vec<ToolCall>,
+    model_parts: Vec<Value>,
 }
 
 impl GeminiStreamState {
@@ -198,6 +278,7 @@ impl GeminiStreamState {
                 .and_then(Value::as_array)
             {
                 for part in parts {
+                    self.model_parts.push(part.clone());
                     if part.get("thought").and_then(Value::as_bool) == Some(true) {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
                             emit(ModelStreamEvent::ReasoningDelta {
@@ -209,6 +290,37 @@ impl GeminiStreamState {
                     if let Some(text) = part.get("text").and_then(Value::as_str) {
                         emit(ModelStreamEvent::AssistantTextDelta {
                             text: text.to_owned(),
+                        });
+                    }
+                    if let Some(function_call) = part.get("functionCall") {
+                        let name = function_call
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                color_eyre::eyre::eyre!(
+                                    "Gemini functionCall is missing a function name"
+                                )
+                            })?;
+                        let arguments = function_call
+                            .get("args")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        if !arguments.is_object() {
+                            bail!("Gemini functionCall args must be a JSON object");
+                        }
+                        let provider_id = function_call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned);
+                        let id = provider_id
+                            .clone()
+                            .unwrap_or_else(|| format!("gemini_call_{}", self.tool_calls.len()));
+                        self.tool_calls.push(ToolCall {
+                            id,
+                            provider_id,
+                            name: name.to_owned(),
+                            arguments,
                         });
                     }
                 }
@@ -226,9 +338,17 @@ impl GeminiStreamState {
                 "Gemini stream ended before a candidate finishReason was received"
             )
         })?;
+        let provider_state = (!self.tool_calls.is_empty()).then(|| {
+            serde_json::json!({
+                "role": "model",
+                "parts": self.model_parts,
+            })
+        });
         Ok(Completion {
             usage: self.usage,
             stop_reason,
+            tool_calls: self.tool_calls,
+            provider_state,
         })
     }
 }
@@ -492,10 +612,10 @@ mod tests {
     }
 
     #[test]
-    fn thought_is_structured_and_non_chat_parts_are_ignored() {
+    fn thought_and_function_calls_are_structured() {
         let event = SseEvent {
             event: None,
-            data: r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"plan"},{"functionCall":{"id":"call-1","name":"search","args":{"q":"rust"}}}]},"finishReason":"STOP"}]}"#
+            data: r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"plan"},{"functionCall":{"id":"call-1","name":"search","args":{"q":"rust"}},"thoughtSignature":"signature-1"}]},"finishReason":"STOP"}]}"#
                 .to_owned(),
         };
         let mut state = GeminiStreamState::default();
@@ -506,7 +626,16 @@ mod tests {
             ModelStreamEvent::ReasoningDelta { text } if text == "plan"
         ));
         assert_eq!(emitted.len(), 1);
-        assert_eq!(state.finish().unwrap().stop_reason, StopReason::Stop);
+        let completion = state.finish().unwrap();
+        assert_eq!(completion.stop_reason, StopReason::Stop);
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].id, "call-1");
+        assert_eq!(completion.tool_calls[0].name, "search");
+        assert_eq!(completion.tool_calls[0].arguments["q"], "rust");
+        assert_eq!(
+            completion.provider_state.as_ref().unwrap()["parts"][1]["thoughtSignature"],
+            "signature-1"
+        );
     }
 
     #[test]
@@ -516,5 +645,74 @@ mod tests {
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn gemini_encodes_function_declarations_calls_and_responses() {
+        let tools = vec![ToolDefinition {
+            model_name: "mcp_exa__search".to_owned(),
+            server_name: "exa".to_owned(),
+            remote_name: "search".to_owned(),
+            description: Some("Search the web".to_owned()),
+            input_schema: serde_json::json!({"type":"object"}),
+        }];
+        assert_eq!(gemini_tools(&tools)[0]["name"], "mcp_exa__search");
+
+        let mut contents = Vec::new();
+        append_gemini_tool_rounds(
+            &mut contents,
+            &[ToolRound {
+                calls: vec![ToolCall {
+                    id: "call-1".to_owned(),
+                    provider_id: Some("call-1".to_owned()),
+                    name: "mcp_exa__search".to_owned(),
+                    arguments: serde_json::json!({"q":"weather"}),
+                }],
+                results: vec![crate::runtime::tool::ToolResult {
+                    call_id: "call-1".to_owned(),
+                    name: "mcp_exa__search".to_owned(),
+                    output: serde_json::json!({"temperature":24}),
+                    is_error: false,
+                }],
+                provider_state: None,
+            }],
+        );
+        assert_eq!(contents[0]["role"], "model");
+        assert_eq!(contents[0]["parts"][0]["functionCall"]["id"], "call-1");
+        assert_eq!(contents[1]["role"], "user");
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["response"]["output"]["temperature"],
+            24
+        );
+
+        let mut no_id_contents = Vec::new();
+        append_gemini_tool_rounds(
+            &mut no_id_contents,
+            &[ToolRound {
+                calls: vec![ToolCall {
+                    id: "internal-1".to_owned(),
+                    provider_id: None,
+                    name: "mcp_exa__search".to_owned(),
+                    arguments: serde_json::json!({}),
+                }],
+                results: vec![crate::runtime::tool::ToolResult {
+                    call_id: "internal-1".to_owned(),
+                    name: "mcp_exa__search".to_owned(),
+                    output: serde_json::json!({}),
+                    is_error: false,
+                }],
+                provider_state: None,
+            }],
+        );
+        assert!(
+            no_id_contents[0]["parts"][0]["functionCall"]
+                .get("id")
+                .is_none()
+        );
+        assert!(
+            no_id_contents[1]["parts"][0]["functionResponse"]
+                .get("id")
+                .is_none()
+        );
     }
 }

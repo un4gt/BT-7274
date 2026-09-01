@@ -13,7 +13,7 @@ BT-7274 是一个基于 Rust 与 Ratatui 的终端 AI Chat 客户端。它专注
 - HTTP/HTTPS、SOCKS5/SOCKS5H 全局代理
 - Vanguard、Carbon、Paper 三套主题与中英双语
 - 按日期写入 `~/.bt7274/logs/YYYY-MM-DD.log` 的脱敏日志
-- 可选远程 Streamable HTTP MCP 连接；不启动本地进程，也不调用 MCP Tool
+- 可选远程 Streamable HTTP MCP：工具发现与调用可用于 Chat Completions、Responses 和 Gemini
 
 ## 安装
 
@@ -35,6 +35,8 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 ```shell
 cargo run --release
 ```
+
+聊天输入框支持 `/models` 打开模型列表、`/mcp` 打开已配置 MCP Server 列表。
 
 ## Gemini 快速配置
 

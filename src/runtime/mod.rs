@@ -23,3 +23,6 @@ pub(crate) mod mcp;
 
 /// 网络请求与后台连接共用的取消原语。
 pub(crate) mod task;
+
+/// Provider 与 MCP 之间共享的工具定义、调用和结果。
+pub(crate) mod tool;

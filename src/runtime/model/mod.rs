@@ -8,6 +8,7 @@ mod transport;
 use color_eyre::eyre::{Report, Result, bail};
 use serde_json::{Map, Value};
 use std::{
+    collections::BTreeSet,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -23,12 +24,14 @@ use crate::{
     event::{AppEvent, Event},
     i18n::Lang,
     runtime::{
-        context::{ContextBudget, ContextInputs, build_budget},
+        context::{ContextBudget, ContextInputs, build_budget, estimate_tokens},
         error::{
             CancellationError, ContextOverflowError, NetworkStage, NetworkTimeoutError,
             RuntimeError,
         },
+        mcp::McpRegistry,
         task::{CancellationReason, CancellationToken},
+        tool::{ToolCall, ToolDefinition, ToolResult, ToolRound},
     },
     secret::SecretRedactor,
     session::Message,
@@ -42,6 +45,9 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 const TITLE_TIMEOUT_SECONDS: u64 = 60;
 const MODEL_FETCH_TIMEOUT_SECONDS: u64 = 60;
+const MAX_TOOL_ROUNDS: usize = 8;
+const MAX_TOOL_CALLS_PER_ROUND: usize = 16;
+const MAX_MODEL_TOOLS: usize = 128;
 
 /// 一次响应的 token 用量（接口未返回时为 `None`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -65,6 +71,8 @@ pub enum StopReason {
 pub struct Completion {
     pub usage: Option<Usage>,
     pub stop_reason: StopReason,
+    pub tool_calls: Vec<ToolCall>,
+    pub provider_state: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +114,19 @@ pub enum ModelStreamEvent {
     },
     System {
         message: String,
+    },
+    ToolCall {
+        call_id: String,
+        server: String,
+        name: String,
+        arguments: Value,
+    },
+    ToolResult {
+        call_id: String,
+        server: String,
+        name: String,
+        output: Value,
+        is_error: bool,
     },
     Completed {
         usage: Option<Usage>,
@@ -255,6 +276,8 @@ pub(crate) struct AdapterStreamRequest<'a> {
     pub settings: &'a ModelSettings,
     pub compacted_context: Option<&'a str>,
     pub history: &'a [Message],
+    pub tools: &'a [ToolDefinition],
+    pub tool_rounds: &'a [ToolRound],
     pub cancellation: &'a CancellationToken,
 }
 
@@ -371,6 +394,7 @@ pub fn spawn_stream_reply(
     context_settings: ContextSettings,
     compacted_context: Option<String>,
     history: Vec<Message>,
+    mcp_registry: McpRegistry,
     stream_id: u64,
     cancellation: CancellationToken,
     sender: mpsc::UnboundedSender<Event>,
@@ -400,7 +424,7 @@ pub fn spawn_stream_reply(
                 Vec::with_capacity(history.len() + usize::from(compacted_messages.is_some()));
             budget_history.extend(compacted_messages);
             budget_history.extend(history.iter().cloned());
-            let budget = build_budget(
+            let mut budget = build_budget(
                 &model_settings,
                 &context_settings,
                 ContextInputs {
@@ -409,26 +433,131 @@ pub fn spawn_stream_reply(
                     messages: &budget_history,
                 },
             );
-            validate_request(
-                &provider,
-                &model,
-                &model_settings,
-                &budget,
-                RequestFeatures::text_stream(),
-            )?;
-            let policy = transport::RequestPolicy::from_parameters(&model_settings.parameters);
-            let request = AdapterStreamRequest {
-                provider: &provider,
-                proxy: &proxy,
-                model: &model,
-                settings: &model_settings,
-                compacted_context: compacted_context.as_deref(),
-                history: &history,
-                cancellation: &cancellation,
+            let tools = if matches!(
+                provider.api_kind,
+                ApiKind::ChatCompletions | ApiKind::Responses | ApiKind::GeminiGenerateContent
+            ) {
+                mcp_registry.tools()
+            } else {
+                Vec::new()
             };
+            if tools.len() > MAX_MODEL_TOOLS {
+                bail!(
+                    "{} MCP tools are connected; the per-request limit is {MAX_MODEL_TOOLS}",
+                    tools.len()
+                );
+            }
+            let mut tool_names = BTreeSet::new();
+            if tools
+                .iter()
+                .any(|tool| !tool_names.insert(tool.model_name.clone()))
+            {
+                bail!("connected MCP tools produced a model-name collision");
+            }
+            budget.add_system_tokens(estimated_tool_catalog_tokens(&tools));
+            let policy = transport::RequestPolicy::from_parameters(&model_settings.parameters);
+            let mut rounds = Vec::new();
+            let mut total_usage = None;
             tokio::time::timeout(
                 policy.overall_timeout,
-                adapter_for(provider.api_kind).stream_reply(request, sink.clone()),
+                async {
+                    for round_index in 0..=MAX_TOOL_ROUNDS {
+                        if cancellation.is_cancelled() {
+                            return Err(Report::new(CancellationError));
+                        }
+                        let mut round_budget = budget.clone();
+                        round_budget
+                            .add_conversation_tokens(estimated_tool_round_tokens(&rounds));
+                        validate_request(
+                            &provider,
+                            &model,
+                            &model_settings,
+                            &round_budget,
+                            RequestFeatures::text_stream(),
+                        )?;
+                        let request = AdapterStreamRequest {
+                            provider: &provider,
+                            proxy: &proxy,
+                            model: &model,
+                            settings: &model_settings,
+                            compacted_context: compacted_context.as_deref(),
+                            history: &history,
+                            tools: &tools,
+                            tool_rounds: &rounds,
+                            cancellation: &cancellation,
+                        };
+                        let mut completion = adapter_for(provider.api_kind)
+                            .stream_reply(request, sink.clone())
+                            .await?;
+                        merge_usage(&mut total_usage, completion.usage);
+                        if completion.tool_calls.is_empty() {
+                            completion.usage = total_usage;
+                            return Ok(completion);
+                        }
+                        if round_index == MAX_TOOL_ROUNDS {
+                            bail!("model exceeded the limit of {MAX_TOOL_ROUNDS} MCP tool rounds");
+                        }
+                        if completion.tool_calls.len() > MAX_TOOL_CALLS_PER_ROUND {
+                            bail!(
+                                "model requested {} tools in one round; the limit is {MAX_TOOL_CALLS_PER_ROUND}",
+                                completion.tool_calls.len()
+                            );
+                        }
+                        let mut call_ids = BTreeSet::new();
+                        if completion.tool_calls.iter().any(|call| {
+                            call.id.trim().is_empty() || !call_ids.insert(call.id.clone())
+                        }) {
+                            bail!("model returned empty or duplicate tool call ids");
+                        }
+                        let calls = completion.tool_calls;
+                        let provider_state = completion.provider_state;
+                        let mut results = Vec::with_capacity(calls.len());
+                        for call in &calls {
+                            let definition = tools
+                                .iter()
+                                .find(|tool| tool.model_name == call.name);
+                            let server = definition
+                                .map(|tool| tool.server_name.clone())
+                                .unwrap_or_else(|| "unavailable".to_owned());
+                            let remote_name = definition
+                                .map(|tool| tool.remote_name.as_str())
+                                .unwrap_or(&call.name);
+                            let remote_name = display_tool_name(remote_name);
+                            sink.emit(ModelStreamEvent::ToolCall {
+                                call_id: call.id.clone(),
+                                server: server.clone(),
+                                name: remote_name.clone(),
+                                arguments: call.arguments.clone(),
+                            });
+                            let result = match mcp_registry.call_tool(call, &cancellation).await {
+                                Ok(result) => result,
+                                Err(_) if cancellation.is_cancelled() => {
+                                    return Err(Report::new(CancellationError));
+                                }
+                                Err(error) => ToolResult {
+                                    call_id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    output: serde_json::json!({ "error": error }),
+                                    is_error: true,
+                                },
+                            };
+                            sink.emit(ModelStreamEvent::ToolResult {
+                                call_id: result.call_id.clone(),
+                                server,
+                                name: remote_name,
+                                output: result.output.clone(),
+                                is_error: result.is_error,
+                            });
+                            results.push(result);
+                        }
+                        rounds.push(ToolRound {
+                            calls,
+                            results,
+                            provider_state,
+                        });
+                    }
+                    unreachable!("bounded MCP tool loop always returns")
+                },
             )
             .await
             .map_err(|_| {
@@ -545,6 +674,71 @@ pub fn spawn_stream_reply(
             stream: stream_id,
             event,
         }));
+    })
+}
+
+fn merge_usage(total: &mut Option<Usage>, current: Option<Usage>) {
+    let Some(current) = current else {
+        return;
+    };
+    let aggregate = total.get_or_insert_default();
+    aggregate.prompt_tokens = aggregate
+        .prompt_tokens
+        .saturating_add(current.prompt_tokens);
+    aggregate.completion_tokens = aggregate
+        .completion_tokens
+        .saturating_add(current.completion_tokens);
+    aggregate.total_tokens = aggregate.total_tokens.saturating_add(current.total_tokens);
+}
+
+fn display_tool_name(name: &str) -> String {
+    let mut display = name
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect::<String>();
+    if display.is_empty() {
+        display.push_str("tool");
+    }
+    display
+}
+
+fn estimated_tool_catalog_tokens(tools: &[ToolDefinition]) -> usize {
+    tools.iter().fold(0, |total, tool| {
+        let description = tool.description.as_deref().unwrap_or_default();
+        let schema = tool.input_schema.to_string();
+        total
+            .saturating_add(8)
+            .saturating_add(estimate_tokens(&tool.model_name))
+            .saturating_add(estimate_tokens(description))
+            .saturating_add(estimate_tokens(&schema))
+    })
+}
+
+fn estimated_tool_round_tokens(rounds: &[ToolRound]) -> usize {
+    rounds.iter().fold(0, |total, round| {
+        let calls = round.calls.iter().fold(0usize, |subtotal, call| {
+            subtotal
+                .saturating_add(8)
+                .saturating_add(estimate_tokens(&call.id))
+                .saturating_add(estimate_tokens(&call.name))
+                .saturating_add(estimate_tokens(&call.arguments.to_string()))
+        });
+        let results = round.results.iter().fold(0usize, |subtotal, result| {
+            subtotal
+                .saturating_add(8)
+                .saturating_add(estimate_tokens(&result.call_id))
+                .saturating_add(estimate_tokens(&result.name))
+                .saturating_add(estimate_tokens(&result.output.to_string()))
+        });
+        let provider_state = round
+            .provider_state
+            .as_ref()
+            .map_or(0, |state| estimate_tokens(&state.to_string()));
+        total
+            .saturating_add(calls)
+            .saturating_add(results)
+            .saturating_add(provider_state)
     })
 }
 

@@ -34,6 +34,25 @@ https://generativelanguage.googleapis.com/v1beta
 模型名可以写成 `gemini-2.5-flash` 或 `models/gemini-2.5-flash`，请求前会统一处理。示例模型
 仅用于展示配置格式；建议在设置中同步模型目录后选择账号实际可用的模型。
 
+## Gateway 配置
+
+`api_kind` 表示 Gateway 实际暴露的协议，不表示模型厂商。通过 OpenRouter 的 OpenAI 兼容
+端点调用 Gemini 时，应使用类似配置：
+
+```toml
+[[providers]]
+id = "provider-openrouter"
+name = "OpenRouter"
+api_kind = "chat_completions"
+base_url = "https://openrouter.ai/api/v1"
+models = ["google/gemini-3.1-pro-preview"]
+api_key = "${OPENROUTER_API_KEY}"
+```
+
+只有 Gateway 提供 `/v1beta/models/{model}:streamGenerateContent` 这类 Gemini 原生端点时，
+才使用 `api_kind = "gemini_generate_content"`。两种配置都能使用 MCP；工具请求格式跟随
+`api_kind`。
+
 ## 设置 API Key
 
 PowerShell：
@@ -68,8 +87,9 @@ API Key Header 会标记为敏感字段，不写入诊断日志。`x-goog-api-cl
 
 解析器接受 Gemini 当前 SSE 分块中的增量 `content.parts`、`thought`、`thoughtSignature`、
 `usageMetadata`、`modelVersion`、`responseId` 和服务等级元数据。聊天正文只呈现普通 `text`；
-`thought = true` 的文本进入 reasoning 区域；函数调用等非聊天 Part 不会执行，也不会混入
-正文。
+`thought = true` 的文本进入 reasoning 区域。配置了已连接的 MCP Server 时，`functionCall`
+会映射为 `tools/call`，结果通过 `functionResponse` 回送；Gemini 3 的 model parts 和
+`thoughtSignature` 会原样保留到下一轮。工具调用和结果单独展示，不混入助手正文。
 
 当前公开的 `finishReason` 会映射为统一完成状态：
 

@@ -65,6 +65,27 @@ impl ContextBudget {
                 .usage_percent()
                 .is_some_and(|percent| percent >= settings.auto_compact_threshold_percent)
     }
+
+    pub fn add_system_tokens(&mut self, tokens: usize) {
+        self.breakdown.system = self.breakdown.system.saturating_add(tokens);
+        self.recalculate();
+    }
+
+    pub fn add_conversation_tokens(&mut self, tokens: usize) {
+        self.breakdown.conversation = self.breakdown.conversation.saturating_add(tokens);
+        self.recalculate();
+    }
+
+    fn recalculate(&mut self) {
+        self.input_tokens = self.breakdown.input_tokens();
+        self.planned_tokens = self.input_tokens.saturating_add(self.reserved_output);
+        self.remaining_tokens = self
+            .context_window
+            .map(|window| window.saturating_sub(self.planned_tokens));
+        self.overflow_tokens = self
+            .context_window
+            .map_or(0, |window| self.planned_tokens.saturating_sub(window));
+    }
 }
 
 pub struct ContextInputs<'a> {
@@ -112,6 +133,9 @@ pub fn build_budget(
                 }
                 MessagePart::System { message } => {
                     breakdown.system = breakdown.system.saturating_add(estimate_tokens(message));
+                }
+                MessagePart::ToolCall { .. } | MessagePart::ToolResult { .. } => {
+                    // 已完成轮次的工具轨迹不重复发送给 Provider。
                 }
             }
         }
@@ -303,6 +327,31 @@ fn summarize_messages(summary: &mut CompactionSummary, messages: &[Message]) {
                 MessagePart::System { message } => {
                     classify_summary_line(summary, "System", message);
                 }
+                MessagePart::ToolCall {
+                    server,
+                    name,
+                    arguments,
+                    ..
+                } => classify_summary_line(
+                    summary,
+                    "Tool call",
+                    &format!("{server}/{name} {arguments}"),
+                ),
+                MessagePart::ToolResult {
+                    server,
+                    name,
+                    output,
+                    is_error,
+                    ..
+                } => classify_summary_line(
+                    summary,
+                    if *is_error {
+                        "Tool error"
+                    } else {
+                        "Tool result"
+                    },
+                    &format!("{server}/{name} {output}"),
+                ),
             }
         }
     }

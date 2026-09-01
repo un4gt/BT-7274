@@ -43,8 +43,25 @@ pub enum IncompleteRecovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessagePart {
-    Reasoning { content: String },
-    System { message: String },
+    Reasoning {
+        content: String,
+    },
+    System {
+        message: String,
+    },
+    ToolCall {
+        call_id: String,
+        server: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolResult {
+        call_id: String,
+        server: String,
+        name: String,
+        output: serde_json::Value,
+        is_error: bool,
+    },
 }
 
 /// 一条聊天消息。
@@ -138,6 +155,38 @@ impl Message {
         if !message.is_empty() {
             self.parts.push(MessagePart::System { message });
         }
+    }
+
+    pub fn push_tool_call(
+        &mut self,
+        call_id: String,
+        server: String,
+        name: String,
+        arguments: serde_json::Value,
+    ) {
+        self.parts.push(MessagePart::ToolCall {
+            call_id,
+            server,
+            name,
+            arguments,
+        });
+    }
+
+    pub fn push_tool_result(
+        &mut self,
+        call_id: String,
+        server: String,
+        name: String,
+        output: serde_json::Value,
+        is_error: bool,
+    ) {
+        self.parts.push(MessagePart::ToolResult {
+            call_id,
+            server,
+            name,
+            output,
+            is_error,
+        });
     }
 }
 
@@ -451,6 +500,12 @@ fn sanitize_messages(messages: &mut [Message], redactor: &SecretRedactor) {
                 MessagePart::System { message } => {
                     *message = redactor.redact(message);
                 }
+                MessagePart::ToolCall { arguments, .. } => {
+                    *arguments = redact_json(arguments);
+                }
+                MessagePart::ToolResult { output, .. } => {
+                    *output = redact_json(output);
+                }
             }
         }
     }
@@ -478,6 +533,30 @@ fn append_message_search_text(output: &mut String, message: &Message) {
         match part {
             MessagePart::Reasoning { content } => output.push_str(content),
             MessagePart::System { message } => output.push_str(message),
+            MessagePart::ToolCall {
+                server,
+                name,
+                arguments,
+                ..
+            } => {
+                output.push_str(server);
+                output.push(' ');
+                output.push_str(name);
+                output.push(' ');
+                output.push_str(&arguments.to_string());
+            }
+            MessagePart::ToolResult {
+                server,
+                name,
+                output: tool_output,
+                ..
+            } => {
+                output.push_str(server);
+                output.push(' ');
+                output.push_str(name);
+                output.push(' ');
+                output.push_str(&tool_output.to_string());
+            }
         }
         output.push('\n');
     }
@@ -662,6 +741,19 @@ mod tests {
         });
         message.append_reasoning("plan");
         message.push_system_event("response.queued".to_owned());
+        message.push_tool_call(
+            "call-1".to_owned(),
+            "docs".to_owned(),
+            "search".to_owned(),
+            serde_json::json!({"q":"rust"}),
+        );
+        message.push_tool_result(
+            "call-1".to_owned(),
+            "docs".to_owned(),
+            "search".to_owned(),
+            serde_json::json!({"answer":"found"}),
+            false,
+        );
         message.status = MessageStatus::Failed;
         message.failure = Some(RuntimeErrorSnapshot {
             kind: crate::runtime::error::RuntimeErrorKind::Protocol,
@@ -674,6 +766,16 @@ mod tests {
         assert!(matches!(
             &parsed.parts[1],
             MessagePart::System { message } if message == "response.queued"
+        ));
+        assert!(matches!(
+            &parsed.parts[2],
+            MessagePart::ToolCall { name, arguments, .. }
+                if name == "search" && arguments["q"] == "rust"
+        ));
+        assert!(matches!(
+            &parsed.parts[3],
+            MessagePart::ToolResult { output, is_error, .. }
+                if !is_error && output["answer"] == "found"
         ));
         assert_eq!(
             parsed

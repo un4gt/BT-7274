@@ -334,6 +334,8 @@ impl AnthropicStreamState {
                 total_tokens: u32_token(Some(prompt.saturating_add(self.output_tokens))),
             }),
             stop_reason,
+            tool_calls: Vec::new(),
+            provider_state: None,
         })
     }
 }

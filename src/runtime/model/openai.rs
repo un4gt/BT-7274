@@ -4,6 +4,7 @@ use async_openai::types::responses;
 use color_eyre::eyre::{Context, Result, bail};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use super::{
     AdapterStreamRequest, AdapterTitleRequest, BoxFuture, Completion, ModelCatalog, ModelInfo,
@@ -14,6 +15,7 @@ use crate::config::{
     CapabilitySupport, ModelCapabilities, ModelParameters, Provider, ProxySettings,
     ReasoningSettings,
 };
+use crate::runtime::tool::{ToolCall, ToolDefinition, ToolRound};
 use crate::session::{Message, Role};
 
 pub(crate) static CHAT_ADAPTER: OpenAiAdapter = OpenAiAdapter {
@@ -79,12 +81,19 @@ async fn stream_chat(request: AdapterStreamRequest<'_>, sink: StreamSink) -> Res
             serde_json::json!({ "role": "user", "content": compacted_context }),
         );
     }
+    append_chat_tool_rounds(&mut messages, request.tool_rounds)?;
     let mut body = serde_json::json!({
         "model": request.model,
         "messages": messages,
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+    if !request.tools.is_empty() {
+        object_mut(&mut body)?.insert(
+            "tools".to_owned(),
+            Value::Array(openai_chat_tools(request.tools)),
+        );
+    }
     apply_common_parameters(
         &mut body,
         &request.settings.parameters,
@@ -131,11 +140,23 @@ async fn stream_responses(
             }),
         );
     }
+    append_response_tool_rounds(&mut items, request.tool_rounds)?;
     let mut body = serde_json::json!({
         "model": request.model,
         "input": items,
         "stream": true,
     });
+    if !request.tools.is_empty() {
+        let object = object_mut(&mut body)?;
+        object.insert(
+            "tools".to_owned(),
+            Value::Array(openai_response_tools(request.tools)),
+        );
+        object.insert(
+            "include".to_owned(),
+            serde_json::json!(["reasoning.encrypted_content"]),
+        );
+    }
     apply_common_parameters(
         &mut body,
         &request.settings.parameters,
@@ -191,6 +212,123 @@ fn openai_response_items(history: &[Message]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn openai_chat_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut function = serde_json::json!({
+                "name": tool.model_name,
+                "parameters": tool.input_schema,
+            });
+            if let Some(description) = &tool.description {
+                function["description"] = Value::String(description.clone());
+            }
+            serde_json::json!({
+                "type": "function",
+                "function": function,
+            })
+        })
+        .collect()
+}
+
+fn openai_response_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut definition = serde_json::json!({
+                "type": "function",
+                "name": tool.model_name,
+                "parameters": tool.input_schema,
+            });
+            if let Some(description) = &tool.description {
+                definition["description"] = Value::String(description.clone());
+            }
+            definition
+        })
+        .collect()
+}
+
+fn append_chat_tool_rounds(messages: &mut Vec<Value>, rounds: &[ToolRound]) -> Result<()> {
+    for round in rounds {
+        let mut legacy_function_call = false;
+        if let Some(state) = round
+            .provider_state
+            .as_ref()
+            .filter(|state| state.is_object())
+        {
+            legacy_function_call = state.get("function_call").is_some();
+            messages.push(state.clone());
+        } else {
+            let calls = round
+                .calls
+                .iter()
+                .map(|call| {
+                    Ok(serde_json::json!({
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": serde_json::to_string(&call.arguments)?,
+                        },
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": calls,
+            }));
+        }
+        for result in &round.results {
+            if legacy_function_call {
+                messages.push(serde_json::json!({
+                    "role": "function",
+                    "name": result.name,
+                    "content": serde_json::to_string(&result.output)?,
+                }));
+            } else {
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": result.call_id,
+                    "content": serde_json::to_string(&result.output)?,
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_response_tool_rounds(items: &mut Vec<Value>, rounds: &[ToolRound]) -> Result<()> {
+    for round in rounds {
+        if let Some(state) = round.provider_state.as_ref().and_then(Value::as_array) {
+            items.extend(state.iter().cloned());
+        } else {
+            for call in &round.calls {
+                items.push(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": call.provider_id.as_deref().unwrap_or(&call.id),
+                    "name": call.name,
+                    "arguments": serde_json::to_string(&call.arguments)?,
+                }));
+            }
+        }
+        for result in &round.results {
+            let provider_call_id = round
+                .calls
+                .iter()
+                .find(|call| call.id == result.call_id)
+                .and_then(|call| call.provider_id.as_deref())
+                .unwrap_or(&result.call_id);
+            items.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": provider_call_id,
+                "output": serde_json::to_string(&result.output)?,
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn apply_common_parameters(
@@ -252,6 +390,35 @@ struct ChatDelta {
     reasoning_content: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ChatToolCallDelta>,
+    #[serde(default)]
+    function_call: Option<ChatFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatToolCallDelta {
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<ChatFunctionDelta>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChatFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Default)]
+struct PartialToolCall {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,6 +436,12 @@ struct ChatStreamState {
     usage: Option<Usage>,
     stop_reason: Option<StopReason>,
     saw_done: bool,
+    tool_calls: BTreeMap<usize, PartialToolCall>,
+    assistant_text: String,
+    reasoning_content: String,
+    reasoning: String,
+    tool_finish: bool,
+    legacy_function_call: bool,
 }
 
 impl ChatStreamState {
@@ -299,17 +472,59 @@ impl ChatStreamState {
         }
         for choice in chunk.choices {
             if let Some(text) = choice.delta.content {
+                self.assistant_text.push_str(&text);
                 emit(ModelStreamEvent::AssistantTextDelta { text });
             }
-            if let Some(text) = choice.delta.reasoning_content.or(choice.delta.reasoning) {
+            if let Some(text) = choice.delta.reasoning_content {
+                self.reasoning_content.push_str(&text);
                 emit(ModelStreamEvent::ReasoningDelta { text });
+            }
+            if let Some(text) = choice.delta.reasoning {
+                self.reasoning.push_str(&text);
+                emit(ModelStreamEvent::ReasoningDelta { text });
+            }
+            for (position, delta) in choice.delta.tool_calls.into_iter().enumerate() {
+                if delta.id.is_none() && delta.function.is_none() {
+                    continue;
+                }
+                let partial = self
+                    .tool_calls
+                    .entry(delta.index.unwrap_or(position))
+                    .or_default();
+                if let Some(id) = delta.id {
+                    partial.id.push_str(&id);
+                }
+                if let Some(function) = delta.function {
+                    if let Some(name) = function.name {
+                        partial.name.push_str(&name);
+                    }
+                    if let Some(arguments) = function.arguments {
+                        partial.arguments.push_str(&arguments);
+                    }
+                }
+            }
+            if let Some(function) = choice.delta.function_call {
+                self.legacy_function_call = true;
+                let partial = self.tool_calls.entry(0).or_default();
+                if partial.id.is_empty() {
+                    partial.id = "legacy_function_call".to_owned();
+                }
+                if let Some(name) = function.name {
+                    partial.name.push_str(&name);
+                }
+                if let Some(arguments) = function.arguments {
+                    partial.arguments.push_str(&arguments);
+                }
             }
             if let Some(reason) = choice.finish_reason {
                 let reason = match reason.as_str() {
                     "stop" => StopReason::Stop,
                     "length" => StopReason::MaxOutputTokens,
                     "content_filter" => StopReason::ContentFilter,
-                    "tool_calls" | "function_call" => StopReason::Other(diagnostic_label(&reason)),
+                    "tool_calls" | "function_call" => {
+                        self.tool_finish = true;
+                        StopReason::Other(diagnostic_label(&reason))
+                    }
                     unknown => bail!(
                         "unknown chat/completions finish_reason {:?}",
                         diagnostic_label(unknown)
@@ -328,11 +543,92 @@ impl ChatStreamState {
         let stop_reason = self
             .stop_reason
             .ok_or_else(|| color_eyre::eyre::eyre!("chat stream ended before a finish marker"))?;
+        let tool_calls = finish_tool_calls(self.tool_calls, "chat")?;
+        if self.tool_finish && tool_calls.is_empty() {
+            bail!("chat stream finished with tool_calls but returned no tool call");
+        }
+        if self.legacy_function_call && tool_calls.len() != 1 {
+            bail!("legacy chat function_call must contain exactly one call");
+        }
+        let provider_state = (!tool_calls.is_empty()).then(|| {
+            let mut state = serde_json::json!({
+                "role": "assistant",
+                "content": if self.assistant_text.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(self.assistant_text)
+                },
+            });
+            if self.legacy_function_call {
+                let call = &tool_calls[0];
+                state["function_call"] = serde_json::json!({
+                    "name": call.name,
+                    "arguments": call.arguments.to_string(),
+                });
+            } else {
+                state["tool_calls"] = Value::Array(
+                    tool_calls
+                        .iter()
+                        .map(|call| {
+                            serde_json::json!({
+                                "id": call.provider_id.as_deref().unwrap_or(&call.id),
+                                "type": "function",
+                                "function": {
+                                    "name": call.name,
+                                    "arguments": call.arguments.to_string(),
+                                },
+                            })
+                        })
+                        .collect(),
+                );
+            }
+            if !self.reasoning_content.is_empty() {
+                state["reasoning_content"] = Value::String(self.reasoning_content);
+            }
+            if !self.reasoning.is_empty() {
+                state["reasoning"] = Value::String(self.reasoning);
+            }
+            state
+        });
         Ok(Completion {
             usage: self.usage,
             stop_reason,
+            tool_calls,
+            provider_state,
         })
     }
+}
+
+fn finish_tool_calls(
+    partials: BTreeMap<usize, PartialToolCall>,
+    protocol: &str,
+) -> Result<Vec<ToolCall>> {
+    partials
+        .into_iter()
+        .map(|(index, partial)| {
+            if partial.name.trim().is_empty() {
+                bail!("{protocol} tool call {index} is missing a function name");
+            }
+            let arguments = if partial.arguments.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&partial.arguments).with_context(|| {
+                    format!("{protocol} tool call {index} has invalid JSON arguments")
+                })?
+            };
+            let id = if partial.id.is_empty() {
+                format!("{protocol}_call_{index}")
+            } else {
+                partial.id
+            };
+            Ok(ToolCall {
+                provider_id: Some(id.clone()),
+                id,
+                name: partial.name,
+                arguments,
+            })
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -340,6 +636,8 @@ struct ResponsesStreamState {
     usage: Option<Usage>,
     completed: bool,
     refusal: bool,
+    tool_calls: BTreeMap<usize, PartialToolCall>,
+    provider_state: Option<Value>,
 }
 
 impl ResponsesStreamState {
@@ -378,7 +676,58 @@ impl ResponsesStreamState {
                 self.refusal = true;
                 emit(ModelStreamEvent::AssistantTextDelta { text: delta.delta });
             }
+            responses::ResponseStreamEvent::ResponseOutputItemAdded(event) => {
+                if let responses::OutputItem::FunctionCall(call) = event.item {
+                    self.record_function_call(
+                        event.output_index as usize,
+                        call.call_id,
+                        call.name,
+                        call.arguments,
+                    );
+                }
+            }
+            responses::ResponseStreamEvent::ResponseOutputItemDone(event) => {
+                if let responses::OutputItem::FunctionCall(call) = event.item {
+                    self.record_function_call(
+                        event.output_index as usize,
+                        call.call_id,
+                        call.name,
+                        call.arguments,
+                    );
+                }
+            }
+            responses::ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(event) => {
+                self.tool_calls
+                    .entry(event.output_index as usize)
+                    .or_default()
+                    .arguments
+                    .push_str(&event.delta);
+            }
+            responses::ResponseStreamEvent::ResponseFunctionCallArgumentsDone(event) => {
+                let partial = self
+                    .tool_calls
+                    .entry(event.output_index as usize)
+                    .or_default();
+                partial.arguments = event.arguments;
+                if let Some(name) = event.name {
+                    partial.name = name;
+                }
+            }
             responses::ResponseStreamEvent::ResponseCompleted(event) => {
+                self.provider_state = Some(
+                    serde_json::to_value(&event.response.output)
+                        .context("failed to preserve Responses output items")?,
+                );
+                for (index, item) in event.response.output.iter().enumerate() {
+                    if let responses::OutputItem::FunctionCall(call) = item {
+                        self.record_function_call(
+                            index,
+                            call.call_id.clone(),
+                            call.name.clone(),
+                            call.arguments.clone(),
+                        );
+                    }
+                }
                 self.usage = event.response.usage.map(|usage| Usage {
                     prompt_tokens: usage.input_tokens,
                     completion_tokens: usage.output_tokens,
@@ -405,10 +754,24 @@ impl ResponsesStreamState {
         Ok(())
     }
 
+    fn record_function_call(
+        &mut self,
+        index: usize,
+        call_id: String,
+        name: String,
+        arguments: String,
+    ) {
+        let partial = self.tool_calls.entry(index).or_default();
+        partial.id = call_id;
+        partial.name = name;
+        partial.arguments = arguments;
+    }
+
     fn finish(self) -> Result<Completion> {
         if !self.completed {
             bail!("Responses stream ended before response.completed");
         }
+        let tool_calls = finish_tool_calls(self.tool_calls, "responses")?;
         Ok(Completion {
             usage: self.usage,
             stop_reason: if self.refusal {
@@ -416,6 +779,8 @@ impl ResponsesStreamState {
             } else {
                 StopReason::Stop
             },
+            tool_calls,
+            provider_state: self.provider_state,
         })
     }
 }
@@ -787,5 +1152,104 @@ mod tests {
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0]["type"], "message");
         assert_eq!(responses[0]["content"], "hello");
+    }
+
+    #[test]
+    fn chat_reassembles_streamed_tool_calls_and_parses_arguments() {
+        let mut state = ChatStreamState::default();
+        for data in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"mcp_docs__search","arguments":"{\"q\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"rust\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            "[DONE]",
+        ] {
+            state
+                .handle(
+                    SseEvent {
+                        event: None,
+                        data: data.to_owned(),
+                    },
+                    |_| {},
+                )
+                .unwrap();
+        }
+        let completion = state.finish().unwrap();
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].id, "call-1");
+        assert_eq!(
+            completion.tool_calls[0].provider_id.as_deref(),
+            Some("call-1")
+        );
+        assert_eq!(completion.tool_calls[0].name, "mcp_docs__search");
+        assert_eq!(
+            completion.tool_calls[0].arguments,
+            serde_json::json!({"q":"rust"})
+        );
+    }
+
+    #[test]
+    fn responses_parses_function_call_output_items() {
+        let mut state = ResponsesStreamState::default();
+        state
+            .handle(
+                SseEvent {
+                    event: None,
+                    data: serde_json::json!({
+                        "type":"response.output_item.done",
+                        "sequence_number":1,
+                        "output_index":0,
+                        "item":{
+                            "type":"function_call",
+                            "arguments":"{\"city\":\"LA\"}",
+                            "call_id":"call-weather",
+                            "name":"mcp_exa__weather"
+                        }
+                    })
+                    .to_string(),
+                },
+                |_| {},
+            )
+            .unwrap();
+        let calls = finish_tool_calls(state.tool_calls, "responses").unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call-weather");
+        assert_eq!(calls[0].provider_id.as_deref(), Some("call-weather"));
+        assert_eq!(calls[0].arguments["city"], "LA");
+    }
+
+    #[test]
+    fn both_openai_protocols_encode_tool_catalog_and_rounds() {
+        let tools = vec![ToolDefinition {
+            model_name: "mcp_docs__search".to_owned(),
+            server_name: "docs".to_owned(),
+            remote_name: "search".to_owned(),
+            description: Some("Search docs".to_owned()),
+            input_schema: serde_json::json!({"type":"object"}),
+        }];
+        assert_eq!(openai_chat_tools(&tools)[0]["type"], "function");
+        assert_eq!(openai_response_tools(&tools)[0]["name"], "mcp_docs__search");
+
+        let round = ToolRound {
+            calls: vec![ToolCall {
+                id: "call-1".to_owned(),
+                provider_id: Some("call-1".to_owned()),
+                name: "mcp_docs__search".to_owned(),
+                arguments: serde_json::json!({"q":"rust"}),
+            }],
+            results: vec![crate::runtime::tool::ToolResult {
+                call_id: "call-1".to_owned(),
+                name: "mcp_docs__search".to_owned(),
+                output: serde_json::json!({"answer":"found"}),
+                is_error: false,
+            }],
+            provider_state: None,
+        };
+        let mut chat = Vec::new();
+        append_chat_tool_rounds(&mut chat, std::slice::from_ref(&round)).unwrap();
+        assert_eq!(chat[0]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(chat[1]["role"], "tool");
+        let mut responses = Vec::new();
+        append_response_tool_rounds(&mut responses, &[round]).unwrap();
+        assert_eq!(responses[0]["type"], "function_call");
+        assert_eq!(responses[1]["type"], "function_call_output");
     }
 }

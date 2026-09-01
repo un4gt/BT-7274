@@ -210,6 +210,56 @@ fn message_lines(
                         .map(|line| Line::from(Span::styled(line, palette.muted))),
                 );
             }
+            MessagePart::ToolCall {
+                server,
+                name,
+                arguments,
+                ..
+            } => {
+                let label = match app.settings.language {
+                    Lang::Zh => format!("◇ 工具调用 · {server}/{name}"),
+                    Lang::En => format!("◇ Tool call · {server}/{name}"),
+                };
+                lines.push(Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(palette.primary)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.extend(
+                    wrap_lines(&json_preview(arguments), width)
+                        .into_iter()
+                        .map(|line| Line::from(Span::styled(line, palette.muted))),
+                );
+            }
+            MessagePart::ToolResult {
+                server,
+                name,
+                output,
+                is_error,
+                ..
+            } => {
+                let label = match (app.settings.language, is_error) {
+                    (Lang::Zh, true) => format!("! 工具错误 · {server}/{name}"),
+                    (Lang::Zh, false) => format!("◆ 工具结果 · {server}/{name}"),
+                    (Lang::En, true) => format!("! Tool error · {server}/{name}"),
+                    (Lang::En, false) => format!("◆ Tool result · {server}/{name}"),
+                };
+                let color = if *is_error {
+                    palette.danger
+                } else {
+                    palette.success
+                };
+                lines.push(Line::from(Span::styled(
+                    label,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )));
+                lines.extend(
+                    wrap_lines(&json_preview(output), width)
+                        .into_iter()
+                        .map(|line| Line::from(Span::styled(line, palette.muted))),
+                );
+            }
         }
     }
     lines.push(Line::default());
@@ -217,6 +267,15 @@ fn message_lines(
         .into_iter()
         .flat_map(|line| markdown::wrap_styled_line(&line, width))
         .collect()
+}
+
+fn json_preview(value: &serde_json::Value) -> String {
+    let raw = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let mut preview = raw.chars().take(4_000).collect::<String>();
+    if raw.chars().count() > 4_000 {
+        preview.push('…');
+    }
+    preview
 }
 
 fn notice_lines(app: &App, width: usize, palette: Palette) -> Vec<Line<'static>> {
@@ -388,5 +447,40 @@ mod tests {
             let window = build_message_window(&app, width, 24, 0, palette);
             assert!(window.lines.iter().all(|line| line.width() <= width));
         }
+    }
+
+    #[tokio::test]
+    async fn tool_calls_and_results_render_as_bounded_structured_parts() {
+        let settings = Settings::default();
+        let mut session = Session::new();
+        let mut message = Message::assistant_streaming(settings.default_selection());
+        message.status = MessageStatus::Completed;
+        message.push_tool_call(
+            "call-1".to_owned(),
+            "docs".to_owned(),
+            "search".to_owned(),
+            serde_json::json!({"query":"洛杉矶天气"}),
+        );
+        message.push_tool_result(
+            "call-1".to_owned(),
+            "docs".to_owned(),
+            "search".to_owned(),
+            serde_json::json!({"temperature":24}),
+            false,
+        );
+        session.messages.push(message);
+        let app = App::new(settings, vec![session]);
+        let palette = theme::palette(app.settings.theme);
+
+        let window = build_message_window(&app, 24, 30, 0, palette);
+        assert!(window.lines.iter().all(|line| line.width() <= 24));
+        let rendered = window
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("工具调用"));
+        assert!(rendered.contains("工具结果"));
     }
 }
