@@ -9,26 +9,26 @@ repository = "https://github.com/un4gt/BT-7274"
 readme = "README.md"
 
 [dependencies]
-crossterm = { version = "0.29.0", features = ["event-stream"] }
-futures = "0.3.32"
-ratatui = "0.30.2"
-tokio = { version = "1.52.3", features = ["full"] }
-color-eyre = "0.6.5"
-async-openai = { version = "0.41.3", features = ["chat-completion", "responses", "model", "byot"] }
-reqwest = { version = "0.13.4", features = ["socks", "json", "stream"] }
+crossterm = { version = "0.29.0", default-features = false, features = ["bracketed-paste", "event-stream", "windows"] }
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+color-eyre = { version = "0.6.5", default-features = false, features = ["track-caller"] }
+async-openai = { version = "0.41.3", default-features = false, features = ["response-types"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "socks", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
 dirs = "6.0"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 unicode-width = "0.2"
 url = "2.5"
-uuid = { version = "1.24", features = ["v4"] }
+uuid = { version = "1.24", default-features = false, features = ["v4"] }
 tracing = "0.1"
 tracing-appender = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 rmcp = { version = "3.1.4", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
-base64 = "0.22.1"
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 tui-markdown = "0.3.9"
 unicode-segmentation = "1.12"
@@ -37,8 +37,9 @@ unicode-segmentation = "1.12"
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "s"
+opt-level = "z"
 strip = true
+panic = "abort"
 
 # The profile that 'dist' will build with
 [profile.dist]
