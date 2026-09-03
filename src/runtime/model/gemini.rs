@@ -278,7 +278,9 @@ impl GeminiStreamState {
                 .and_then(Value::as_array)
             {
                 for part in parts {
-                    self.model_parts.push(part.clone());
+                    if let Some(replay_part) = gemini_replay_part(part) {
+                        self.model_parts.push(replay_part);
+                    }
                     if part.get("thought").and_then(Value::as_bool) == Some(true) {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
                             emit(ModelStreamEvent::ReasoningDelta {
@@ -351,6 +353,38 @@ impl GeminiStreamState {
             provider_state,
         })
     }
+}
+
+fn gemini_replay_part(part: &Value) -> Option<Value> {
+    let mut part = part.as_object()?.clone();
+    if gemini_part_has_data(&part) {
+        return Some(Value::Object(part));
+    }
+
+    let has_thought_metadata = part.get("thought").is_some_and(Value::is_boolean)
+        || part.get("thoughtSignature").is_some_and(Value::is_string);
+    if !has_thought_metadata {
+        return None;
+    }
+
+    // Some compatible gateways omit the empty text carried by signature-only stream parts.
+    part.insert("text".to_owned(), Value::String(String::new()));
+    Some(Value::Object(part))
+}
+
+fn gemini_part_has_data(part: &serde_json::Map<String, Value>) -> bool {
+    const DATA_FIELDS: [&str; 7] = [
+        "text",
+        "inlineData",
+        "functionCall",
+        "functionResponse",
+        "fileData",
+        "executableCode",
+        "codeExecutionResult",
+    ];
+    DATA_FIELDS
+        .iter()
+        .any(|field| part.get(*field).is_some_and(|value| !value.is_null()))
 }
 
 fn gemini_stop_reason(reason: &str) -> StopReason {
@@ -635,6 +669,29 @@ mod tests {
         assert_eq!(
             completion.provider_state.as_ref().unwrap()["parts"][1]["thoughtSignature"],
             "signature-1"
+        );
+    }
+
+    #[test]
+    fn signature_only_stream_part_gets_valid_data_before_tool_replay() {
+        let event = SseEvent {
+            event: None,
+            data: r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"plan"},{"functionCall":{"name":"search","args":{"q":"rust"}}},{"thoughtSignature":"signature-only"}]},"finishReason":"STOP"}]}"#
+                .to_owned(),
+        };
+        let mut state = GeminiStreamState::default();
+        state.handle(event, |_| {}).unwrap();
+
+        let completion = state.finish().unwrap();
+        let provider_state = completion.provider_state.unwrap();
+        let parts = provider_state["parts"].as_array().unwrap();
+
+        assert_eq!(parts[2]["thoughtSignature"], "signature-only");
+        assert_eq!(parts[2]["text"], "");
+        assert!(
+            parts
+                .iter()
+                .all(|part| { part.as_object().is_some_and(gemini_part_has_data) })
         );
     }
 

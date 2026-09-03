@@ -89,7 +89,9 @@ API Key Header 会标记为敏感字段，不写入诊断日志。`x-goog-api-cl
 `usageMetadata`、`modelVersion`、`responseId` 和服务等级元数据。聊天正文只呈现普通 `text`；
 `thought = true` 的文本进入 reasoning 区域。配置了已连接的 MCP Server 时，`functionCall`
 会映射为 `tools/call`，结果通过 `functionResponse` 回送；Gemini 3 的 model parts 和
-`thoughtSignature` 会原样保留到下一轮。工具调用和结果单独展示，不混入助手正文。
+`thoughtSignature` 会保序保留到下一轮。部分兼容网关会从仅含签名的 Part 中省略空 `text`，
+客户端会补回该字段，避免下一轮请求产生 `required oneof field 'data'`。工具调用和结果单独
+展示，不混入助手正文。
 
 当前公开的 `finishReason` 会映射为统一完成状态：
 

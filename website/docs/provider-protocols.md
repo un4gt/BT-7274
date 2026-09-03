@@ -67,7 +67,8 @@ GenerateContent 端点时才选择 `gemini_generate_content`。
 - 普通 text part 映射正文，`thought = true` 的 text part 映射 reasoning
 - 工具声明使用 `functionDeclarations`，响应解析 `functionCall`
 - 后续请求使用 model `functionCall` 和 user `functionResponse`
-- Gemini 3 返回的 model parts（包括 `thoughtSignature`）在工具下一轮原样回传
+- Gemini 3 返回的 model parts（包括 `thoughtSignature`）在工具下一轮保序回传；兼容网关若
+  省略签名 Part 的空 `text`，客户端会补回合法的空文本数据字段
 - `usageMetadata` 映射 token usage
 - 已知 safety/limit finish reason 映射统一完成原因
 - 未知 finish reason 报 Protocol Error
