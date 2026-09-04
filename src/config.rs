@@ -1705,6 +1705,44 @@ mod tests {
     }
 
     #[test]
+    fn multiple_provider_models_survive_config_loading() {
+        let raw = format!(
+            r#"
+config_version = {CURRENT_CONFIG_VERSION}
+current_provider = 0
+model = "gemini-3.1-pro-preview"
+
+[[providers]]
+id = "provider-gemini"
+name = "Gemini"
+api_kind = "gemini_generate_content"
+models = ["gemini-3.1-pro-preview"]
+api_key = "${{GEMINI_API_KEY}}"
+base_url = "https://opus.example/v1beta"
+headers = {{ authorization = "${{OPUS_AUTHORIZATION}}" }}
+
+[[providers]]
+id = "cerebras"
+name = "Cerebras"
+api_kind = "chat_completions"
+models = ["gemma-4-31b", "qwen-3.8-27b", "gpt-oss-120b"]
+api_key = "${{CEREBRAS_API_KEY}}"
+base_url = "https://api.cerebras.ai/v1"
+"#
+        );
+
+        let settings = Settings::from_toml(&raw).unwrap();
+
+        assert_eq!(settings.providers.len(), 2);
+        assert_eq!(settings.providers[0].models, ["gemini-3.1-pro-preview"]);
+        assert_eq!(
+            settings.providers[1].models,
+            ["gemma-4-31b", "qwen-3.8-27b", "gpt-oss-120b"]
+        );
+        assert!(settings.selection_available(&settings.providers[1].selection("gpt-oss-120b")));
+    }
+
+    #[test]
     fn current_shape_roundtrips_without_migration() {
         let mut settings = Settings::default();
         settings.providers[0].api_key = Some(SecretValue::from("${OPENAI_API_KEY}"));

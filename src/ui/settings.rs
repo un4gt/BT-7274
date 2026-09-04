@@ -13,7 +13,7 @@ use ratatui::{
 };
 
 use super::{
-    dim_background, popup_rect,
+    dim_background, popup_rect, spinner_frame,
     theme::{self, Palette},
 };
 use crate::app::{
@@ -25,8 +25,6 @@ use crate::runtime::mcp::McpServerStatus;
 use crate::text::{truncate_width, visible_slice_with_cursor};
 use unicode_width::UnicodeWidthStr;
 
-/// spinner 动画帧。
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// 标签列宽（右对齐）。
 const LABEL_WIDTH: usize = 10;
 const SETTINGS_MODAL_WIDTH: u16 = 116;
@@ -325,7 +323,7 @@ fn render_models(
     // —— 供应商列表 ——
     let section_focus =
         modal.pane == SettingsPane::Content && modal.section == ModelsSection::Providers;
-    let spinner = SPINNER[ticks as usize % SPINNER.len()];
+    let spinner = spinner_frame(ticks);
     let mut provider_title = format!("{} ({})", texts.providers_title, providers.len());
     if modal.sync_id.is_some() {
         provider_title = format!("{spinner} {provider_title}");
@@ -557,7 +555,7 @@ fn render_mcp(modal: &SettingsUi, area: Rect, frame: &mut Frame, ticks: u64, pal
                     ),
                     McpServerStatus::Starting => (
                         mcp_status_text(lang, McpServerStatus::Starting),
-                        SPINNER[ticks as usize % SPINNER.len()],
+                        spinner_frame(ticks),
                         palette.warning,
                     ),
                     McpServerStatus::Connected => (
@@ -572,7 +570,7 @@ fn render_mcp(modal: &SettingsUi, area: Rect, frame: &mut Frame, ticks: u64, pal
                     ),
                     McpServerStatus::Stopping => (
                         mcp_status_text(lang, McpServerStatus::Stopping),
-                        SPINNER[ticks as usize % SPINNER.len()],
+                        spinner_frame(ticks),
                         palette.warning,
                     ),
                 }
@@ -1556,7 +1554,7 @@ fn render_wizard(
         }
         // 3/3 选择模型
         _ => {
-            let spinner = SPINNER[ticks as usize % SPINNER.len()];
+            let spinner = spinner_frame(ticks);
             let status: Line = if wizard.fetching {
                 Line::from(Span::styled(
                     format!("{spinner} {}", texts.syncing),

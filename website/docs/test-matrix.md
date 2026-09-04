@@ -46,6 +46,7 @@
 - Markdown headings、bold、lists、tables、blockquote、inline/fenced code 稳定渲染。
 - 未闭合 Markdown 在增量流期间不造成布局跳变或 panic。
 - 长历史只格式化当前视口附近消息，空闲时不产生周期 tick。
+- 消息区溢出时显示滚动条；空流式回复显示动画；工具结果默认折叠且可展开。
 - MCP 列表和向导在窄终端可滚动，凭据字段始终遮蔽。
 
 ## 故障注入

@@ -1,4 +1,4 @@
-//! 模型快速切换弹窗：列出当前供应商的模型，Tab 循环切换供应商。
+//! 模型快速切换弹窗：按供应商分组列出全部模型，Tab 可快速跳转供应商。
 
 use ratatui::{
     Frame,
@@ -19,7 +19,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     let texts = app.settings.language.texts();
     let palette = theme::palette(app.settings.theme);
     let provider_idx = picker.provider_idx.min(app.settings.providers.len() - 1);
-    let provider = &app.settings.providers[provider_idx];
     let (title, hint) = match picker.mode {
         PickerMode::SessionDefault => (texts.picker_session_title, texts.picker_session_hint),
         PickerMode::NextTurn => (texts.picker_turn_title, texts.picker_turn_hint),
@@ -31,7 +30,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .title(format!("{} · {}", title, provider.name))
+        .title(title)
         .title_bottom(Line::from(hint).right_aligned())
         .border_style(palette.border(true))
         .style(palette.surface());
@@ -47,55 +46,79 @@ pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical(constraints).split(inner);
     let list_area = chunks[0];
 
-    if provider.models.is_empty() {
-        Paragraph::new(Span::styled(
-            texts.picker_empty,
-            Style::default().fg(palette.muted).bg(palette.surface),
-        ))
-        .render(list_area, frame.buffer_mut());
-    } else {
-        let width = list_area.width as usize;
-        let items: Vec<ListItem> = provider
-            .models
-            .iter()
-            .map(|model| {
-                let active =
-                    provider.id == picker.active.provider_id && *model == picker.active.model;
-                let marker = if active { "● " } else { "  " };
-                let style = if active {
-                    Style::default()
-                        .fg(palette.primary)
-                        .bg(palette.surface)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    palette.surface()
-                };
-                ListItem::from(format!(
-                    "{marker}{}",
-                    truncate_width(model, width.saturating_sub(4))
-                ))
-                .style(style)
-            })
-            .collect();
+    let width = list_area.width as usize;
+    let row_width = width.saturating_sub(4);
+    let mut items = Vec::new();
+    let mut selected_row = 0;
+    for (index, provider) in app.settings.providers.iter().enumerate() {
+        let selected_provider = index == provider_idx;
+        let provider_row = items.len();
+        if selected_provider && provider.models.is_empty() {
+            selected_row = provider_row;
+        }
+        let marker = if selected_provider { "▸ " } else { "  " };
+        let label = format!(
+            "{} [{}] ({})",
+            provider.name,
+            provider.api_kind.short_label(),
+            provider.models.len()
+        );
+        let header_style = if selected_provider {
+            Style::default()
+                .fg(palette.primary)
+                .bg(palette.surface)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(palette.muted)
+                .bg(palette.surface)
+                .add_modifier(Modifier::BOLD)
+        };
+        items.push(
+            ListItem::from(format!("{marker}{}", truncate_width(&label, row_width)))
+                .style(header_style),
+        );
 
-        // 与侧栏一致：窗口尽量靠上，选择项必须可见
-        let visible = list_area.height as usize;
-        let len = provider.models.len();
-        let max_offset = len.saturating_sub(visible.min(len));
-        let offset = picker
-            .selected
-            .checked_sub(visible)
-            .map(|value| value + 1)
-            .unwrap_or(0)
-            .min(max_offset);
-        let mut state = ListState::default()
-            .with_selected(Some(picker.selected))
-            .with_offset(offset);
-        let list = List::new(items)
-            .highlight_style(palette.selected())
-            .highlight_symbol("❯ ");
-        StatefulWidget::render(list, list_area, frame.buffer_mut(), &mut state);
+        for (model_idx, model) in provider.models.iter().enumerate() {
+            if selected_provider && model_idx == picker.selected {
+                selected_row = items.len();
+            }
+            let active = provider.id == picker.active.provider_id && *model == picker.active.model;
+            let marker = if active { "● " } else { "  " };
+            let style = if active {
+                Style::default()
+                    .fg(palette.primary)
+                    .bg(palette.surface)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                palette.surface()
+            };
+            items.push(
+                ListItem::from(format!(
+                    "  {marker}{}",
+                    truncate_width(model, row_width.saturating_sub(2))
+                ))
+                .style(style),
+            );
+        }
     }
+
+    // 与侧栏一致：窗口尽量靠上，选择项必须可见。
+    let visible = list_area.height as usize;
+    let len = items.len();
+    let max_offset = len.saturating_sub(visible.min(len));
+    let offset = selected_row
+        .checked_sub(visible)
+        .map(|value| value + 1)
+        .unwrap_or(0)
+        .min(max_offset);
+    let mut state = ListState::default()
+        .with_selected(Some(selected_row))
+        .with_offset(offset);
+    let list = List::new(items)
+        .highlight_style(palette.selected())
+        .highlight_symbol("❯ ");
+    StatefulWidget::render(list, list_area, frame.buffer_mut(), &mut state);
 
     if picker.editing {
         let input_area = chunks[1];

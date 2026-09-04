@@ -10,10 +10,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::config::ProxyMode;
-use crate::ui::theme::Palette;
-
-/// spinner 动画帧。
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+use crate::ui::{spinner_frame, theme::Palette};
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer, palette: Palette) {
     let texts = app.settings.language.texts();
@@ -84,7 +81,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer, palette: Palette) {
     }
 
     if app.generating() {
-        let frame = SPINNER[app.ticks as usize % SPINNER.len()];
+        let frame = spinner_frame(app.ticks);
         spans.push(Span::raw(" │ "));
         spans.push(Span::styled(
             format!("{frame} {}", texts.footer_generating),

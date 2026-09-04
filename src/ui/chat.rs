@@ -6,7 +6,10 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph, Widget},
+    widgets::{
+        Block, BorderType, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        StatefulWidget, Widget,
+    },
 };
 
 use crate::app::{App, Focus, NoticeLevel};
@@ -14,7 +17,7 @@ use crate::i18n::Lang;
 use crate::runtime::conversation::{MessagePart, MessageStatus, Role};
 use crate::text::{truncate_width, wrap_lines};
 
-use super::{art, markdown, theme::Palette};
+use super::{art, markdown, spinner_frame, theme::Palette};
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
     let input_height = match area.height {
@@ -42,16 +45,40 @@ fn render_messages(app: &App, area: Rect, buf: &mut Buffer, palette: Palette) {
         art::render_fill(inner, buf, palette);
     }
 
-    let width = inner.width as usize;
+    // 为滚动条保留稳定的一列，避免它覆盖正文；极窄区域优先保留内容。
+    let show_scrollbar = inner.width >= 4;
+    let content_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width.saturating_sub(u16::from(show_scrollbar)),
+        inner.height,
+    );
+    let width = content_area.width as usize;
     let visible = inner.height as usize;
     let window = build_message_window(app, width, visible, app.scroll as usize, palette);
     Paragraph::new(window.lines)
         .style(palette.surface())
-        .render(inner, buf);
+        .render(content_area, buf);
+    if show_scrollbar && let Some(metrics) = window.scrollbar {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .style(Style::default().fg(palette.border).bg(palette.surface))
+            .thumb_style(Style::default().fg(palette.primary).bg(palette.surface));
+        let mut state = ScrollbarState::new(metrics.content_length)
+            .position(metrics.position)
+            .viewport_content_length(visible);
+        StatefulWidget::render(scrollbar, inner, buf, &mut state);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScrollbarMetrics {
+    content_length: usize,
+    position: usize,
 }
 
 struct MessageWindow {
     lines: Vec<Line<'static>>,
+    scrollbar: Option<ScrollbarMetrics>,
     #[cfg_attr(not(test), allow(dead_code))]
     rendered_messages: usize,
 }
@@ -66,11 +93,13 @@ fn build_message_window(
     if visible == 0 || width == 0 {
         return MessageWindow {
             lines: Vec::new(),
+            scrollbar: None,
             rendered_messages: 0,
         };
     }
     let session = app.open_session();
     let suffix = notice_lines(app, width, palette);
+    let suffix_len = suffix.len();
     let target = visible.saturating_add(requested_scroll).max(1);
     let mut collected = suffix.len();
     let mut chunks = Vec::new();
@@ -94,7 +123,31 @@ fn build_message_window(
     }
     lines.extend(suffix);
 
-    let scroll = requested_scroll.min(lines.len().saturating_sub(visible.min(lines.len())));
+    let known_lines = lines.len();
+    let scroll = requested_scroll.min(known_lines.saturating_sub(visible.min(known_lines)));
+    let remaining_messages = session.messages.len().saturating_sub(rendered_messages);
+    let known_message_lines = known_lines.saturating_sub(suffix_len);
+    let average_message_lines = if rendered_messages == 0 {
+        1
+    } else {
+        known_message_lines
+            .saturating_add(rendered_messages - 1)
+            .checked_div(rendered_messages)
+            .unwrap_or(1)
+            .max(1)
+    };
+    // 长历史仍只格式化视口附近消息；未加载部分按已知消息平均高度估算滚动条。
+    let estimated_hidden_lines = if exhausted {
+        0
+    } else {
+        remaining_messages.saturating_mul(average_message_lines)
+    };
+    let content_length = estimated_hidden_lines.saturating_add(known_lines);
+    let scrollbar = (content_length > visible).then_some(ScrollbarMetrics {
+        content_length,
+        position: estimated_hidden_lines
+            .saturating_add(known_lines.saturating_sub(visible).saturating_sub(scroll)),
+    });
     let end = lines.len().saturating_sub(scroll);
     let start = end.saturating_sub(visible);
     let mut viewport = lines
@@ -109,6 +162,7 @@ fn build_message_window(
     }
     MessageWindow {
         lines: viewport,
+        scrollbar,
         rendered_messages,
     }
 }
@@ -170,20 +224,33 @@ fn message_lines(
         ));
     }
     let mut lines = vec![Line::from(role_spans)];
-    let content = if message.role == Role::Assistant && message.content.is_empty() {
-        app.settings
-            .language
-            .empty_assistant_placeholder(message.status)
+    if message.role == Role::Assistant
+        && message.content.is_empty()
+        && message.status == MessageStatus::Streaming
+    {
+        lines.push(Line::from(Span::styled(
+            spinner_frame(app.ticks),
+            Style::default()
+                .fg(palette.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
     } else {
-        &message.content
-    };
-    lines.extend(markdown::render_markdown(
-        content,
-        width,
-        palette,
-        app.settings.theme,
-    ));
+        let content = if message.role == Role::Assistant && message.content.is_empty() {
+            app.settings
+                .language
+                .empty_assistant_placeholder(message.status)
+        } else {
+            &message.content
+        };
+        lines.extend(markdown::render_markdown(
+            content,
+            width,
+            palette,
+            app.settings.theme,
+        ));
+    }
 
+    let tool_details_expanded = app.tool_details_expanded();
     for part in &message.parts {
         match part {
             MessagePart::Reasoning { content } => {
@@ -239,26 +306,33 @@ fn message_lines(
                 is_error,
                 ..
             } => {
-                let label = match (app.settings.language, is_error) {
-                    (Lang::Zh, true) => format!("! 工具错误 · {server}/{name}"),
-                    (Lang::Zh, false) => format!("◆ 工具结果 · {server}/{name}"),
-                    (Lang::En, true) => format!("! Tool error · {server}/{name}"),
-                    (Lang::En, false) => format!("◆ Tool result · {server}/{name}"),
+                let marker = if tool_details_expanded { "▾" } else { "▸" };
+                let mut label = match (app.settings.language, is_error) {
+                    (Lang::Zh, true) => format!("{marker} ! 工具错误 · {server}/{name}"),
+                    (Lang::Zh, false) => format!("{marker} 工具结果 · {server}/{name}"),
+                    (Lang::En, true) => format!("{marker} ! Tool error · {server}/{name}"),
+                    (Lang::En, false) => format!("{marker} Tool result · {server}/{name}"),
                 };
+                if !tool_details_expanded {
+                    label.push_str(" · ");
+                    label.push_str(&tool_result_summary(output, app.settings.language));
+                }
                 let color = if *is_error {
                     palette.danger
                 } else {
                     palette.success
                 };
                 lines.push(Line::from(Span::styled(
-                    label,
+                    truncate_width(&label, width),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 )));
-                lines.extend(
-                    wrap_lines(&json_preview(output), width)
-                        .into_iter()
-                        .map(|line| Line::from(Span::styled(line, palette.muted))),
-                );
+                if tool_details_expanded {
+                    lines.extend(
+                        wrap_lines(&json_preview(output), width)
+                            .into_iter()
+                            .map(|line| Line::from(Span::styled(line, palette.muted))),
+                    );
+                }
             }
         }
     }
@@ -267,6 +341,39 @@ fn message_lines(
         .into_iter()
         .flat_map(|line| markdown::wrap_styled_line(&line, width))
         .collect()
+}
+
+fn tool_result_summary(value: &serde_json::Value, lang: Lang) -> String {
+    match value {
+        serde_json::Value::Object(fields) => {
+            let keys = fields
+                .keys()
+                .take(3)
+                .map(|key| truncate_width(key, 16))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let summary = match lang {
+                Lang::Zh => format!("对象 · {} 个字段", fields.len()),
+                Lang::En => format!("object · {} fields", fields.len()),
+            };
+            if keys.is_empty() {
+                summary
+            } else {
+                format!("{summary} · {keys}")
+            }
+        }
+        serde_json::Value::Array(items) => match lang {
+            Lang::Zh => format!("数组 · {} 项", items.len()),
+            Lang::En => format!("array · {} items", items.len()),
+        },
+        serde_json::Value::String(value) => match lang {
+            Lang::Zh => format!("文本 · {} 字节", value.len()),
+            Lang::En => format!("text · {} bytes", value.len()),
+        },
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Null => "null".to_owned(),
+    }
 }
 
 fn json_preview(value: &serde_json::Value) -> String {
@@ -450,6 +557,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_streaming_reply_uses_an_animated_indicator_without_waiting_copy() {
+        let settings = Settings::default();
+        let mut session = Session::new();
+        session
+            .messages
+            .push(Message::assistant_streaming(settings.default_selection()));
+        let mut app = App::new(settings, vec![session]);
+        let palette = theme::palette(app.settings.theme);
+
+        let first = build_message_window(&app, 40, 8, 0, palette)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(first.contains(spinner_frame(0)));
+        assert!(!first.contains("等待首个响应片段"));
+
+        app.ticks = 1;
+        let second = build_message_window(&app, 40, 8, 0, palette)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(second.contains(spinner_frame(1)));
+        assert_ne!(spinner_frame(0), spinner_frame(1));
+    }
+
+    #[tokio::test]
+    async fn overflowing_messages_render_a_scrollbar_that_tracks_page_scroll() {
+        let settings = Settings::default();
+        let mut session = Session::new();
+        session.messages = (0..30)
+            .map(|index| Message::user(format!("message {index}"), None))
+            .collect();
+        let app = App::new(settings, vec![session]);
+        let palette = theme::palette(app.settings.theme);
+
+        let bottom = build_message_window(&app, 30, 8, 0, palette)
+            .scrollbar
+            .unwrap();
+        let scrolled = build_message_window(&app, 30, 8, 8, palette)
+            .scrollbar
+            .unwrap();
+        assert!(scrolled.position < bottom.position);
+
+        let area = Rect::new(0, 0, 32, 10);
+        let mut buffer = Buffer::empty(area);
+        render_messages(&app, area, &mut buffer, palette);
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains('█'));
+        assert!(rendered.contains('║'));
+    }
+
+    #[tokio::test]
     async fn tool_calls_and_results_render_as_bounded_structured_parts() {
         let settings = Settings::default();
         let mut session = Session::new();
@@ -465,16 +632,16 @@ mod tests {
             "call-1".to_owned(),
             "docs".to_owned(),
             "search".to_owned(),
-            serde_json::json!({"temperature":24}),
+            serde_json::json!({"temperature":24,"payload":"full-tool-result-body"}),
             false,
         );
         session.messages.push(message);
-        let app = App::new(settings, vec![session]);
+        let mut app = App::new(settings, vec![session]);
         let palette = theme::palette(app.settings.theme);
 
-        let window = build_message_window(&app, 24, 30, 0, palette);
-        assert!(window.lines.iter().all(|line| line.width() <= 24));
-        let rendered = window
+        let narrow = build_message_window(&app, 24, 30, 0, palette);
+        assert!(narrow.lines.iter().all(|line| line.width() <= 24));
+        let rendered = build_message_window(&app, 80, 30, 0, palette)
             .lines
             .iter()
             .map(Line::to_string)
@@ -482,5 +649,22 @@ mod tests {
             .join("\n");
         assert!(rendered.contains("工具调用"));
         assert!(rendered.contains("工具结果"));
+        assert!(rendered.contains('▸'));
+        assert!(rendered.contains("对象"));
+        assert!(!rendered.contains("full-tool-result-body"));
+
+        app.handle_key_events(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(3),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        let expanded = build_message_window(&app, 80, 30, 0, palette)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded.contains('▾'));
+        assert!(expanded.contains("full-tool-result-body"));
     }
 }

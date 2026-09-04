@@ -13,7 +13,7 @@ use crate::runtime::{
         CompactionPlan, ContextBudget, ContextInputs, build_budget, prepare_compaction,
         undo_last_compaction,
     },
-    conversation::{IncompleteRecovery, Message, MessageStatus, Role, Session},
+    conversation::{IncompleteRecovery, Message, MessagePart, MessageStatus, Role, Session},
     error::{RuntimeError, RuntimeErrorKind},
     mcp::{McpRegistry, McpRuntimeEvent, McpServerSnapshot, McpServerStatus},
     model::{
@@ -27,7 +27,7 @@ use crate::ui::{self, markdown::MarkdownCodeBlock};
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::DefaultTerminal;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthStr;
@@ -700,7 +700,7 @@ pub enum PickerMode {
 pub struct ModelPicker {
     pub mode: PickerMode,
     pub active: ModelSelection,
-    /// 当前浏览的供应商下标（Tab 循环切换）。
+    /// 当前选中模型所属的供应商下标（Tab 可按供应商快速跳转）。
     pub provider_idx: usize,
     pub selected: usize,
     /// 是否正在输入新模型名。
@@ -729,6 +729,59 @@ impl ModelPicker {
             editing: false,
             buffer: Vec::new(),
             cursor: 0,
+        }
+    }
+
+    fn switch_provider(&mut self, settings: &Settings, forward: bool) {
+        let count = settings.providers.len();
+        self.provider_idx = if forward {
+            (self.provider_idx + 1) % count
+        } else {
+            (self.provider_idx + count - 1) % count
+        };
+        let provider = &settings.providers[self.provider_idx];
+        self.selected = provider
+            .models
+            .iter()
+            .position(|model| provider.id == self.active.provider_id && *model == self.active.model)
+            .unwrap_or(0);
+    }
+
+    /// 在按 Provider 排列的统一模型列表中移动；到达首尾后保持不动。
+    fn move_model(&mut self, settings: &Settings, forward: bool) {
+        let Some(provider) = settings.providers.get(self.provider_idx) else {
+            return;
+        };
+        if forward {
+            if self.selected + 1 < provider.models.len() {
+                self.selected += 1;
+                return;
+            }
+            if let Some((provider_idx, _)) = settings
+                .providers
+                .iter()
+                .enumerate()
+                .skip(self.provider_idx + 1)
+                .find(|(_, provider)| !provider.models.is_empty())
+            {
+                self.provider_idx = provider_idx;
+                self.selected = 0;
+            }
+            return;
+        }
+
+        if self.selected > 0 && self.selected < provider.models.len() {
+            self.selected -= 1;
+            return;
+        }
+        if let Some((provider_idx, provider)) = settings.providers[..self.provider_idx]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, provider)| !provider.models.is_empty())
+        {
+            self.provider_idx = provider_idx;
+            self.selected = provider.models.len() - 1;
         }
     }
 }
@@ -813,6 +866,8 @@ pub struct App {
     pub editor: ChatEditor,
     /// 聊天区滚动行数（0 = 固定在底部）。
     pub scroll: u16,
+    /// 当前进程内由用户展开工具详情的会话；默认折叠且不进入持久化数据。
+    expanded_tool_sessions: HashSet<String>,
     /// 当前流式生成状态。
     pub stream: Option<StreamState>,
     /// 只作用于下一次成功发起请求的模型覆盖。
@@ -870,6 +925,7 @@ impl App {
             sidebar_pos: 0,
             editor: ChatEditor::default(),
             scroll: 0,
+            expanded_tool_sessions: HashSet::new(),
             stream: None,
             next_turn_model: None,
             stream_task: None,
@@ -924,6 +980,27 @@ impl App {
         self.next_turn_model
             .as_ref()
             .is_some_and(|selection| self.settings.selection_available(selection))
+    }
+
+    pub(crate) fn tool_details_expanded(&self) -> bool {
+        self.expanded_tool_sessions
+            .contains(&self.open_session().id)
+    }
+
+    fn toggle_tool_details(&mut self) {
+        let has_tool_results = self.open_session().messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::ToolResult { .. }))
+        });
+        if !has_tool_results {
+            return;
+        }
+        let session_id = self.open_session().id.clone();
+        if !self.expanded_tool_sessions.insert(session_id.clone()) {
+            self.expanded_tool_sessions.remove(&session_id);
+        }
     }
 
     /// 是否正在生成。
@@ -1140,6 +1217,10 @@ impl App {
         // 模型切换弹窗打开时独占按键
         if self.picker.is_some() {
             self.handle_picker_key(key_event);
+            return Ok(());
+        }
+        if key_event.code == KeyCode::F(3) {
+            self.toggle_tool_details();
             return Ok(());
         }
         if key_event.code == KeyCode::F(2)
@@ -2402,6 +2483,7 @@ impl App {
         }
         self.sessions.remove(index);
         self.notices.remove(id);
+        self.expanded_tool_sessions.remove(id);
         if self
             .error_detail
             .as_ref()
@@ -3521,26 +3603,17 @@ impl App {
             let len = self.settings.providers[picker.provider_idx].models.len();
             match key_event.code {
                 KeyCode::Esc => close = true,
-                KeyCode::Tab => {
-                    let count = self.settings.providers.len();
-                    picker.provider_idx = (picker.provider_idx + 1) % count;
-                    let models = &self.settings.providers[picker.provider_idx].models;
-                    picker.selected = models
-                        .iter()
-                        .position(|model| {
-                            self.settings.providers[picker.provider_idx].id
-                                == picker.active.provider_id
-                                && *model == picker.active.model
-                        })
-                        .unwrap_or(0);
+                KeyCode::Tab | KeyCode::Right if plain => {
+                    picker.switch_provider(&self.settings, true);
+                }
+                KeyCode::BackTab | KeyCode::Left if plain => {
+                    picker.switch_provider(&self.settings, false);
                 }
                 KeyCode::Up | KeyCode::Char('k') if plain => {
-                    picker.selected = picker.selected.saturating_sub(1);
+                    picker.move_model(&self.settings, false);
                 }
                 KeyCode::Down | KeyCode::Char('j') if plain => {
-                    if len > 0 {
-                        picker.selected = (picker.selected + 1).min(len - 1);
-                    }
+                    picker.move_model(&self.settings, true);
                 }
                 KeyCode::Enter => {
                     if let Some(name) = self.settings.providers[picker.provider_idx]
@@ -4181,6 +4254,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_picker_moves_across_provider_groups() {
+        let mut settings = Settings::default();
+        settings.providers[0].id = "provider-gemini".to_owned();
+        settings.providers[0].name = "Gemini".to_owned();
+        settings.providers[0].api_kind = ApiKind::GeminiGenerateContent;
+        settings.providers[0].models = vec!["gemini-3.1-pro-preview".to_owned()];
+        settings.model = "gemini-3.1-pro-preview".to_owned();
+
+        let mut cerebras = Provider::new(ApiKind::ChatCompletions);
+        cerebras.id = "cerebras".to_owned();
+        cerebras.name = "Cerebras".to_owned();
+        cerebras.models = vec![
+            "gemma-4-31b".to_owned(),
+            "qwen-3.8-27b".to_owned(),
+            "gpt-oss-120b".to_owned(),
+        ];
+        settings.providers.push(cerebras);
+
+        let mut app = App::new(settings, vec![session("session-a/invalid")]);
+        app.handle_key_events(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))
+            .unwrap();
+        app.handle_key_events(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!((picker.provider_idx, picker.selected), (1, 0));
+
+        app.handle_key_events(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key_events(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        let selected = app.open_session().default_model.as_ref().unwrap();
+        assert_eq!(selected.provider_id, "cerebras");
+        assert_eq!(selected.model, "qwen-3.8-27b");
+    }
+
+    #[test]
+    fn model_picker_navigation_clamps_at_empty_provider_edges() {
+        let mut settings = Settings::default();
+        settings.providers[0].models.clear();
+        let mut populated = Provider::new(ApiKind::ChatCompletions);
+        populated.models = vec!["model-a".to_owned(), "model-b".to_owned()];
+        settings.providers.push(populated);
+        settings
+            .providers
+            .push(Provider::new(ApiKind::ChatCompletions));
+
+        let mut picker = ModelPicker::new(
+            &settings,
+            settings.providers[0].selection("fallback"),
+            PickerMode::SessionDefault,
+        );
+        picker.move_model(&settings, false);
+        assert_eq!((picker.provider_idx, picker.selected), (0, 0));
+
+        picker.move_model(&settings, true);
+        assert_eq!((picker.provider_idx, picker.selected), (1, 0));
+        picker.move_model(&settings, true);
+        assert_eq!((picker.provider_idx, picker.selected), (1, 1));
+        picker.move_model(&settings, true);
+        assert_eq!((picker.provider_idx, picker.selected), (1, 1));
+
+        picker.switch_provider(&settings, true);
+        assert_eq!((picker.provider_idx, picker.selected), (2, 0));
+        picker.move_model(&settings, true);
+        assert_eq!((picker.provider_idx, picker.selected), (2, 0));
+        picker.move_model(&settings, false);
+        assert_eq!((picker.provider_idx, picker.selected), (1, 1));
+    }
+
+    #[tokio::test]
     async fn picker_modes_do_not_mutate_the_application_default() {
         let mut app = test_app();
         let app_default = app.settings.default_selection();
@@ -4352,6 +4497,36 @@ mod tests {
         let mut app = test_app();
         app.handle_paste("first\r\nsecond\tvalue".to_owned());
         assert_eq!(app.editor.text(), "first\nsecond\tvalue");
+    }
+
+    #[tokio::test]
+    async fn f3_toggles_tool_details_only_when_results_exist() {
+        let mut app = test_app();
+        app.handle_key_events(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.tool_details_expanded());
+
+        app.sessions[0].messages.push(Message::assistant_streaming(
+            app.settings.default_selection(),
+        ));
+        app.sessions[0]
+            .messages
+            .last_mut()
+            .unwrap()
+            .push_tool_result(
+                "call-1".to_owned(),
+                "docs".to_owned(),
+                "search".to_owned(),
+                serde_json::json!({"content": "large result"}),
+                false,
+            );
+
+        app.handle_key_events(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.tool_details_expanded());
+        app.handle_key_events(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.tool_details_expanded());
     }
 
     #[tokio::test]

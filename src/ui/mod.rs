@@ -34,6 +34,13 @@ use ratatui::{
 
 use crate::app::App;
 
+/// 所有可见后台活动共用同一组动画帧，避免不同面板的加载反馈漂移。
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(crate) fn spinner_frame(ticks: u64) -> &'static str {
+    SPINNER[ticks as usize % SPINNER.len()]
+}
+
 /// 渲染整帧。
 pub fn draw(frame: &mut Frame, app: &App) {
     let palette = theme::palette(app.settings.theme);
@@ -185,6 +192,45 @@ mod tests {
         wizard.step = 3;
         wizard.manual_active = true;
         draw_sizes(&app);
+    }
+
+    #[tokio::test]
+    async fn model_picker_renders_models_from_every_provider() {
+        let mut settings = Settings::default();
+        settings.providers[0].id = "provider-gemini".to_owned();
+        settings.providers[0].name = "Gemini".to_owned();
+        settings.providers[0].api_kind = ApiKind::GeminiGenerateContent;
+        settings.providers[0].models = vec!["gemini-3.1-pro-preview".to_owned()];
+        settings.model = "gemini-3.1-pro-preview".to_owned();
+
+        let mut cerebras = Provider::new(ApiKind::ChatCompletions);
+        cerebras.id = "cerebras".to_owned();
+        cerebras.name = "Cerebras".to_owned();
+        cerebras.models = vec![
+            "gemma-4-31b".to_owned(),
+            "qwen-3.8-27b".to_owned(),
+            "gpt-oss-120b".to_owned(),
+        ];
+        settings.providers.push(cerebras);
+
+        let mut app = App::new(settings, vec![Session::new()]);
+        app.handle_key_events(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))
+            .unwrap();
+        let rendered = render_text(&app, 80, 24);
+
+        for expected in [
+            "Gemini [gem] (1)",
+            "gemini-3.1-pro-preview",
+            "Cerebras [chat] (3)",
+            "gemma-4-31b",
+            "qwen-3.8-27b",
+            "gpt-oss-120b",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing picker row: {expected}"
+            );
+        }
     }
 
     #[tokio::test]
