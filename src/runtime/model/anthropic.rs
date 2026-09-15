@@ -95,14 +95,14 @@ async fn stream_messages(
 fn anthropic_messages(history: &[Message]) -> Vec<Value> {
     history
         .iter()
-        .filter(|message| message.role == Role::User || !message.content.is_empty())
+        .filter(|message| message.role == Role::User || !message.content().is_empty())
         .map(|message| {
             serde_json::json!({
                 "role": match message.role {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                 },
-                "content": [{"type": "text", "text": message.content}],
+                "content": [{"type": "text", "text": message.content()}],
             })
         })
         .collect()

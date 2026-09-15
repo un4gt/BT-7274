@@ -1274,6 +1274,9 @@ pub struct Settings {
     /// 视觉主题。
     #[serde(default)]
     pub theme: Theme,
+    /// 输入框星空特效；可在运行时通过配置文件或设置界面开关。
+    #[serde(default)]
+    pub whimsy: bool,
     /// 所有 LLM 与模型同步请求共用的代理。
     #[serde(default)]
     pub proxy: ProxySettings,
@@ -1323,6 +1326,7 @@ impl Default for Settings {
             model: default_model(),
             language: Lang::default(),
             theme: Theme::default(),
+            whimsy: false,
             proxy: ProxySettings::default(),
             context: ContextSettings::default(),
             mcp_servers: Vec::new(),
@@ -1608,6 +1612,47 @@ impl Settings {
     }
 }
 
+/// 只观察 whimsy，不重新加载 Provider、解析密钥或改写编辑中的配置文件。
+pub(crate) struct WhimsyWatcher {
+    path: PathBuf,
+    last_raw: Option<String>,
+    last_value: Option<bool>,
+}
+
+impl WhimsyWatcher {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last_raw: None,
+            last_value: None,
+        }
+    }
+
+    pub fn poll(&mut self) -> Option<bool> {
+        let raw = std::fs::read_to_string(&self.path).ok()?;
+        if self.last_raw.as_ref() == Some(&raw) {
+            return None;
+        }
+        #[derive(Deserialize)]
+        struct LiveSettings {
+            config_version: u32,
+            #[serde(default)]
+            whimsy: bool,
+        }
+        let parsed = toml::from_str::<LiveSettings>(&raw);
+        self.last_raw = Some(raw);
+        // 编辑期间的半成品、错误类型和不兼容版本保留上一次有效状态。
+        let settings = parsed.ok()?;
+        if settings.config_version != CURRENT_CONFIG_VERSION
+            || self.last_value == Some(settings.whimsy)
+        {
+            return None;
+        }
+        self.last_value = Some(settings.whimsy);
+        Some(settings.whimsy)
+    }
+}
+
 fn config_version_issue(raw: &str) -> Option<ConfigVersionIssue> {
     let document: toml::Value = toml::from_str(raw).ok()?;
     match document.get("config_version") {
@@ -1669,6 +1714,55 @@ mod tests {
         assert_eq!(settings.proxy, ProxySettings::default());
         assert!(settings.mcp_servers.is_empty());
         assert!(!settings.show_titan);
+        assert!(!settings.whimsy);
+    }
+
+    #[test]
+    fn whimsy_is_optional_and_round_trips_without_changing_config_version() {
+        let raw = format!("config_version = {CURRENT_CONFIG_VERSION}\n");
+        assert!(!Settings::from_toml(&raw).unwrap().whimsy);
+        let settings = Settings::from_toml(&format!("{raw}whimsy = true\n")).unwrap();
+        assert!(settings.whimsy);
+        let serialized = toml::to_string_pretty(&settings).unwrap();
+        assert!(Settings::from_toml(&serialized).unwrap().whimsy);
+        assert!(Settings::from_toml(&format!("{raw}whimsy = 'yes'\n")).is_err());
+    }
+
+    #[test]
+    fn whimsy_watcher_retains_valid_value_through_partial_edits_and_file_replacement() {
+        let path = std::env::temp_dir().join(format!("bt-7274-whimsy-{}.toml", Uuid::new_v4()));
+        let mut watcher = WhimsyWatcher::new(path.clone());
+        assert_eq!(watcher.poll(), None);
+        let raw = format!("config_version = {CURRENT_CONFIG_VERSION}\nwhimsy = true\n");
+        std::fs::write(&path, &raw).unwrap();
+        assert_eq!(watcher.poll(), Some(true));
+        assert_eq!(watcher.poll(), None);
+        for invalid in [
+            "config_version = 8\nwhimsy = ",
+            "config_version = 8\nwhimsy = 'false'",
+            "config_version = 999\nwhimsy = false",
+            "whimsy = false",
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert_eq!(watcher.poll(), None);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        }
+        std::fs::write(&path, format!("{raw}# unrelated edit\n")).unwrap();
+        assert_eq!(watcher.poll(), None);
+        // 模拟编辑器删除后重建文件，不以旧文件句柄或 mtime 判断变化。
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(watcher.poll(), None);
+        std::fs::write(&path, raw.replace("true", "false")).unwrap();
+        assert_eq!(watcher.poll(), Some(false));
+        std::fs::write(&path, &raw).unwrap();
+        assert_eq!(watcher.poll(), Some(true));
+        std::fs::write(
+            &path,
+            format!("config_version = {CURRENT_CONFIG_VERSION}\n"),
+        )
+        .unwrap();
+        assert_eq!(watcher.poll(), Some(false));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

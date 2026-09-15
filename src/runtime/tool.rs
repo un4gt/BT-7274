@@ -16,6 +16,8 @@ pub struct ToolDefinition {
 /// 模型请求执行一次工具调用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {
+    /// Provider item/index within this model round, also used by streamed UI updates.
+    pub index: usize,
     pub id: String,
     /// Provider 返回的原始调用 ID；协议允许缺失时与内部 `id` 分开保存。
     pub provider_id: Option<String>,

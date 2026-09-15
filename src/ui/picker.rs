@@ -13,6 +13,7 @@ use ratatui::{
 use super::{dim_background, popup_rect, theme};
 use crate::app::{App, PickerMode};
 use crate::text::{truncate_width, visible_slice_with_cursor};
+use unicode_width::UnicodeWidthStr;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let Some(picker) = &app.picker else { return };
@@ -122,13 +123,14 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     if picker.editing {
         let input_area = chunks[1];
-        let prefix_len = texts.picker_new_label.chars().count() + 2; // "标签: "
-        let avail = (input_area.width as usize).saturating_sub(prefix_len + 1);
+        let prefix = format!("{}: ", texts.picker_new_label);
+        let prefix_width = prefix.width();
+        let avail = (input_area.width as usize).saturating_sub(prefix_width + 1);
         let (visible_text, cursor_col) =
             visible_slice_with_cursor(&picker.buffer, picker.cursor, avail);
         let line = Line::from(vec![
             Span::styled(
-                format!("{}: ", texts.picker_new_label),
+                prefix,
                 Style::default().fg(palette.primary).bg(palette.surface),
             ),
             Span::styled(visible_text, palette.surface()),
@@ -138,7 +140,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             .render(input_area, frame.buffer_mut());
         if input_area.width > 0 && input_area.height > 0 {
             frame.set_cursor_position(Position::new(
-                input_area.x + ((prefix_len + cursor_col) as u16).min(input_area.width - 1),
+                input_area.x + ((prefix_width + cursor_col) as u16).min(input_area.width - 1),
                 input_area.y,
             ));
         }

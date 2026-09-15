@@ -5,7 +5,7 @@ use chrono::Utc;
 use crate::{
     config::{ContextSettings, ModelSettings},
     session::{
-        CompactionRecord, CompactionSummary, Message, MessagePart, MessageStatus, Role, Session,
+        BlockKind, CompactionRecord, CompactionSummary, Message, MessageStatus, Role, Session,
     },
 };
 
@@ -122,19 +122,19 @@ pub fn build_budget(
     for message in inputs.messages {
         breakdown.conversation = breakdown
             .conversation
-            .saturating_add(estimate_tokens(&message.content))
+            .saturating_add(estimate_tokens(&message.content()))
             .saturating_add(MESSAGE_OVERHEAD_TOKENS);
-        for part in &message.parts {
-            match part {
-                MessagePart::Reasoning { content } => {
+        for block in &message.blocks {
+            match &block.kind {
+                BlockKind::Reasoning { content, .. } => {
                     breakdown.conversation = breakdown
                         .conversation
                         .saturating_add(estimate_tokens(content));
                 }
-                MessagePart::System { message } => {
+                BlockKind::System { message } => {
                     breakdown.system = breakdown.system.saturating_add(estimate_tokens(message));
                 }
-                MessagePart::ToolCall { .. } | MessagePart::ToolResult { .. } => {
+                BlockKind::Text { .. } | BlockKind::Tool { .. } => {
                     // 已完成轮次的工具轨迹不重复发送给 Provider。
                 }
             }
@@ -314,44 +314,43 @@ fn summarize_messages(summary: &mut CompactionSummary, messages: &[Message]) {
             Role::User => "User",
             Role::Assistant => "Assistant",
         };
-        for line in message.content.lines() {
+        for line in message.content().lines() {
             classify_summary_line(summary, role, line);
         }
-        for part in &message.parts {
-            match part {
-                MessagePart::Reasoning { content } => {
+        for block in &message.blocks {
+            match &block.kind {
+                BlockKind::Text { .. } => {}
+                BlockKind::Reasoning { content, .. } => {
                     for line in content.lines() {
                         classify_summary_line(summary, "Reasoning", line);
                     }
                 }
-                MessagePart::System { message } => {
+                BlockKind::System { message } => {
                     classify_summary_line(summary, "System", message);
                 }
-                MessagePart::ToolCall {
-                    server,
-                    name,
-                    arguments,
-                    ..
-                } => classify_summary_line(
-                    summary,
-                    "Tool call",
-                    &format!("{server}/{name} {arguments}"),
-                ),
-                MessagePart::ToolResult {
-                    server,
-                    name,
-                    output,
-                    is_error,
-                    ..
-                } => classify_summary_line(
-                    summary,
-                    if *is_error {
-                        "Tool error"
-                    } else {
-                        "Tool result"
-                    },
-                    &format!("{server}/{name} {output}"),
-                ),
+                BlockKind::Tool { tool } => {
+                    let arguments = tool
+                        .arguments
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| tool.arguments_text.clone());
+                    classify_summary_line(
+                        summary,
+                        "Tool call",
+                        &format!("{}/{} {arguments}", tool.server, tool.name),
+                    );
+                    if let Some(output) = &tool.output {
+                        classify_summary_line(
+                            summary,
+                            if tool.status == crate::session::ToolStatus::Failed {
+                                "Tool error"
+                            } else {
+                                "Tool result"
+                            },
+                            &format!("{}/{} {output}", tool.server, tool.name),
+                        );
+                    }
+                }
             }
         }
     }
@@ -486,7 +485,7 @@ mod tests {
                     provider_name: "Provider".to_owned(),
                     model: "model".to_owned(),
                 });
-                message.content = content.to_owned();
+                message.append_text(content);
                 message.status = MessageStatus::Completed;
                 message
             }
@@ -663,13 +662,13 @@ mod tests {
             session
                 .messages
                 .iter()
-                .any(|message| message.content.contains("latest user requirement"))
+                .any(|message| message.content().contains("latest user requirement"))
         );
         assert!(
             session
                 .messages
                 .iter()
-                .any(|message| message.content.contains("latest assistant state"))
+                .any(|message| message.content().contains("latest assistant state"))
         );
         assert!(undo_last_compaction(&mut session));
         assert_eq!(session.messages, original);
@@ -694,7 +693,7 @@ mod tests {
             model: "model".to_owned(),
         };
         let mut streaming = Message::assistant_streaming(selection);
-        streaming.content = "partial".to_owned();
+        streaming.append_text("partial");
         session.messages.push(streaming);
         let plan = prepare_compaction(
             &session,

@@ -13,7 +13,7 @@ use crate::runtime::{
         CompactionPlan, ContextBudget, ContextInputs, build_budget, prepare_compaction,
         undo_last_compaction,
     },
-    conversation::{IncompleteRecovery, Message, MessagePart, MessageStatus, Role, Session},
+    conversation::{IncompleteRecovery, Message, MessageStatus, Role, Session},
     error::{RuntimeError, RuntimeErrorKind},
     mcp::{McpRegistry, McpRuntimeEvent, McpServerSnapshot, McpServerStatus},
     model::{
@@ -23,11 +23,14 @@ use crate::runtime::{
     task::{CancellationReason, CancellationToken},
 };
 use crate::text::normalize_newlines;
-use crate::ui::{self, markdown::MarkdownCodeBlock};
+use crate::ui::mouse::{MouseMap, MouseTarget};
+use crate::ui::{self, markdown::MarkdownCodeBlock, sparkle::Sparkle};
+use crate::ui::{activity::ActivityOverlay, transcript::ChatViewState};
 use chrono::Utc;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::DefaultTerminal;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::{DefaultTerminal, layout::Position};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthStr;
@@ -140,10 +143,11 @@ pub enum SettingsField {
     Language,
     Theme,
     TitanArt,
+    Whimsy,
 }
 
 impl SettingsField {
-    pub const ALL: [Self; 3] = [Self::Language, Self::Theme, Self::TitanArt];
+    pub const ALL: [Self; 4] = [Self::Language, Self::Theme, Self::TitanArt, Self::Whimsy];
 
     fn from_index(index: usize) -> Self {
         Self::ALL[index % Self::ALL.len()]
@@ -864,10 +868,11 @@ pub struct App {
     pub sidebar_pos: usize,
     /// Unicode-aware 多行聊天编辑器。
     pub editor: ChatEditor,
-    /// 聊天区滚动行数（0 = 固定在底部）。
-    pub scroll: u16,
-    /// 当前进程内由用户展开工具详情的会话；默认折叠且不进入持久化数据。
-    expanded_tool_sessions: HashSet<String>,
+    /// 输入框星空的显示状态和下一帧截止时间。
+    pub(crate) sparkle: Sparkle,
+    pub(crate) chat_view: RefCell<ChatViewState>,
+    pub(crate) activity_overlay: Option<ActivityOverlay>,
+    pub(crate) mouse: RefCell<MouseMap>,
     /// 当前流式生成状态。
     pub stream: Option<StreamState>,
     /// 只作用于下一次成功发起请求的模型覆盖。
@@ -916,6 +921,7 @@ impl App {
         let mut app = Self {
             running: true,
             events,
+            sparkle: Sparkle::new(settings.whimsy),
             settings,
             modal: None,
             picker: None,
@@ -924,8 +930,9 @@ impl App {
             focus: Focus::default(),
             sidebar_pos: 0,
             editor: ChatEditor::default(),
-            scroll: 0,
-            expanded_tool_sessions: HashSet::new(),
+            chat_view: RefCell::default(),
+            activity_overlay: None,
+            mouse: RefCell::default(),
             stream: None,
             next_turn_model: None,
             stream_task: None,
@@ -982,25 +989,9 @@ impl App {
             .is_some_and(|selection| self.settings.selection_available(selection))
     }
 
-    pub(crate) fn tool_details_expanded(&self) -> bool {
-        self.expanded_tool_sessions
-            .contains(&self.open_session().id)
-    }
-
-    fn toggle_tool_details(&mut self) {
-        let has_tool_results = self.open_session().messages.iter().any(|message| {
-            message
-                .parts
-                .iter()
-                .any(|part| matches!(part, MessagePart::ToolResult { .. }))
-        });
-        if !has_tool_results {
-            return;
-        }
-        let session_id = self.open_session().id.clone();
-        if !self.expanded_tool_sessions.insert(session_id.clone()) {
-            self.expanded_tool_sessions.remove(&session_id);
-        }
+    fn open_activity_details(&mut self) {
+        let preferred = self.chat_view.borrow().visible_activity.clone();
+        self.activity_overlay = Some(ActivityOverlay::new(self.open_session(), preferred));
     }
 
     /// 是否正在生成。
@@ -1059,11 +1050,27 @@ impl App {
     }
 
     async fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> color_eyre::Result<()> {
+        self.events.watch_whimsy(Settings::config_path()?);
         while self.running {
+            self.sparkle
+                .set_enabled(self.settings.whimsy, Instant::now());
+            // 动画重绘前隐藏光标，画完后由 Ratatui 恢复位置，避免星点刷新时闪移。
+            terminal.hide_cursor()?;
             terminal.draw(|frame| ui::draw(frame, self))?;
             self.events
                 .set_animation_enabled(self.periodic_tick_required());
-            match self.events.next().await? {
+            let next_frame = self.sparkle.next_frame();
+            let event = tokio::select! {
+                event = self.events.next() => event?,
+                _ = async {
+                    if let Some(deadline) = next_frame {
+                        tokio::time::sleep_until(deadline.into()).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => continue,
+            };
+            match event {
                 Event::Tick => self.tick(),
                 Event::Crossterm(event) => match event {
                     crossterm::event::Event::Key(key_event)
@@ -1073,6 +1080,14 @@ impl App {
                     }
                     // 括号粘贴：整块进入当前聚焦的输入缓冲
                     crossterm::event::Event::Paste(text) => self.handle_paste(text),
+                    crossterm::event::Event::Mouse(mouse) => {
+                        self.handle_mouse_events(mouse);
+                    }
+                    crossterm::event::Event::FocusGained => self.sparkle.set_terminal_focus(true),
+                    crossterm::event::Event::FocusLost => {
+                        self.sparkle.set_terminal_focus(false);
+                        self.mouse.borrow_mut().dragging_input = false;
+                    }
                     _ => {}
                 },
                 Event::App(app_event) => self.handle_app_event(app_event),
@@ -1106,7 +1121,10 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
-        if self.error_detail.is_some() {
+        if self.error_detail.is_some()
+            || self.activity_overlay.is_some()
+            || self.code_overlay.is_some()
+        {
             return;
         }
         if let Some(overlay) = &mut self.conversation_overlay {
@@ -1200,6 +1218,11 @@ impl App {
             return Ok(());
         }
 
+        if self.activity_overlay.is_some() {
+            ui::activity::handle_key(self, key_event);
+            return Ok(());
+        }
+
         if self.code_overlay.is_some() {
             self.handle_code_overlay_key(key_event);
             return Ok(());
@@ -1220,7 +1243,7 @@ impl App {
             return Ok(());
         }
         if key_event.code == KeyCode::F(3) {
-            self.toggle_tool_details();
+            self.open_activity_details();
             return Ok(());
         }
         if key_event.code == KeyCode::F(2)
@@ -1489,7 +1512,7 @@ impl App {
             .open_session()
             .messages
             .iter()
-            .flat_map(|message| ui::markdown::extract_code_blocks(&message.content))
+            .flat_map(|message| ui::markdown::extract_code_blocks(&message.content()))
             .collect::<Vec<_>>();
         if blocks.is_empty() {
             let message = match self.settings.language {
@@ -1609,7 +1632,7 @@ impl App {
         };
         self.current = session_index;
         self.sidebar_pos = session_index;
-        self.scroll = 0;
+        self.chat_view.borrow_mut().follow_latest();
         self.conversation_overlay = Some(ConversationOverlay::Recovery(RecoveryState {
             session_id: self.sessions[session_index].id.clone(),
             message_index,
@@ -1749,6 +1772,15 @@ impl App {
     fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Quit => self.quit(),
+            AppEvent::WhimsyChanged(enabled) => {
+                if let Some(modal) = self.modal.as_mut()
+                    && modal.draft.whimsy == self.settings.whimsy
+                {
+                    modal.draft.whimsy = enabled;
+                }
+                self.settings.whimsy = enabled;
+                self.sparkle.set_enabled(enabled, Instant::now());
+            }
             AppEvent::ModelStream { stream, event } => self.on_model_stream(stream, event),
             AppEvent::McpRuntime(event) => self.on_mcp_runtime(event),
             AppEvent::TitleGenerated { session, title } => {
@@ -1794,19 +1826,10 @@ impl App {
             ModelStreamEvent::AssistantTextDelta { text } => self.on_delta(stream, text),
             ModelStreamEvent::ReasoningDelta { text } => self.on_reasoning(stream, text),
             ModelStreamEvent::System { message } => self.on_system_event(stream, message),
-            ModelStreamEvent::ToolCall {
-                call_id,
-                server,
-                name,
-                arguments,
-            } => self.on_tool_call(stream, call_id, server, name, arguments),
-            ModelStreamEvent::ToolResult {
-                call_id,
-                server,
-                name,
-                output,
-                is_error,
-            } => self.on_tool_result(stream, call_id, server, name, output, is_error),
+            event @ (ModelStreamEvent::ToolCallDelta { .. }
+            | ModelStreamEvent::ToolCallReady { .. }
+            | ModelStreamEvent::ToolCall { .. }
+            | ModelStreamEvent::ToolResult { .. }) => self.on_tool_event(stream, event),
             ModelStreamEvent::Completed {
                 usage,
                 stop_reason,
@@ -1846,9 +1869,7 @@ impl App {
         else {
             return;
         };
-        stream_message_mut(session, selection)
-            .content
-            .push_str(&text);
+        stream_message_mut(session, selection).append_text(&text);
     }
 
     fn on_reasoning(&mut self, stream: u64, text: String) {
@@ -1889,14 +1910,7 @@ impl App {
         }
     }
 
-    fn on_tool_call(
-        &mut self,
-        stream: u64,
-        call_id: String,
-        server: String,
-        name: String,
-        arguments: serde_json::Value,
-    ) {
+    fn on_tool_event(&mut self, stream: u64, event: ModelStreamEvent) {
         let Some((session_id, selection)) = self.active_stream_target(stream) else {
             return;
         };
@@ -1905,31 +1919,33 @@ impl App {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
-            stream_message_mut(session, selection).push_tool_call(call_id, server, name, arguments);
-            self.mark_stream_dirty(stream);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn on_tool_result(
-        &mut self,
-        stream: u64,
-        call_id: String,
-        server: String,
-        name: String,
-        output: serde_json::Value,
-        is_error: bool,
-    ) {
-        let Some((session_id, selection)) = self.active_stream_target(stream) else {
-            return;
-        };
-        if let Some(session) = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        {
-            stream_message_mut(session, selection)
-                .push_tool_result(call_id, server, name, output, is_error);
+            let message = stream_message_mut(session, selection);
+            match event {
+                ModelStreamEvent::ToolCallDelta {
+                    round,
+                    index,
+                    call_id,
+                    name,
+                    arguments,
+                    replace,
+                } => message.tool_delta(round, index, call_id, name, arguments, replace),
+                ModelStreamEvent::ToolCallReady {
+                    round,
+                    index,
+                    call_id,
+                    server,
+                    name,
+                    arguments,
+                } => message.tool_ready(round, index, call_id, server, name, arguments),
+                ModelStreamEvent::ToolCall { round, index } => message.tool_started(round, index),
+                ModelStreamEvent::ToolResult {
+                    round,
+                    index,
+                    output,
+                    is_error,
+                } => message.tool_result(round, index, output, is_error),
+                _ => unreachable!("non-tool event routed to tool reducer"),
+            }
             self.mark_stream_dirty(stream);
         }
     }
@@ -2040,7 +2056,7 @@ impl App {
                 message.role == Role::Assistant && message.status == MessageStatus::Streaming
             })
         {
-            message.status = status;
+            message.finish(status);
             message.failure = failure;
         }
     }
@@ -2337,7 +2353,7 @@ impl App {
             return Err(RuntimeError::from_report(&error, format!("{error:#}")));
         }
 
-        self.scroll = 0;
+        self.chat_view.borrow_mut().follow_latest();
         let session_id = working_session.id.clone();
         working_session.messages.push(prospective);
         let history = working_session.messages.clone();
@@ -2444,7 +2460,8 @@ impl App {
     fn switch_session(&mut self, id: &str) {
         if let Some(index) = self.sessions.iter().position(|s| s.id == id) {
             self.current = index;
-            self.scroll = 0;
+            self.activity_overlay = None;
+            self.chat_view.borrow_mut().follow_latest();
             self.focus = Focus::Input;
             self.error_detail = None;
         }
@@ -2460,7 +2477,7 @@ impl App {
         self.sessions.insert(0, session);
         self.current = 0;
         self.sidebar_pos = 0;
-        self.scroll = 0;
+        self.chat_view.borrow_mut().follow_latest();
         self.focus = Focus::Input;
         if let Some(err) = save_error {
             let session_id = self.open_session().id.clone();
@@ -2483,7 +2500,7 @@ impl App {
         }
         self.sessions.remove(index);
         self.notices.remove(id);
-        self.expanded_tool_sessions.remove(id);
+        self.activity_overlay = None;
         if self
             .error_detail
             .as_ref()
@@ -2507,7 +2524,108 @@ impl App {
             self.current = self.current.min(self.sessions.len() - 1);
         }
         self.sidebar_pos = self.sidebar_pos.min(self.sessions.len().saturating_sub(1));
-        self.scroll = 0;
+        self.chat_view.borrow_mut().follow_latest();
+    }
+
+    /// Mouse hit targets come from the last frame, so scrolling and overlays cannot click through.
+    pub(crate) fn handle_mouse_events(&mut self, event: MouseEvent) -> bool {
+        if matches!(event.kind, MouseEventKind::Up(MouseButton::Left)) {
+            self.mouse.borrow_mut().dragging_input = false;
+            return false;
+        }
+        if !matches!(
+            event.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) {
+            return false;
+        }
+        let dragging = event.kind == MouseEventKind::Drag(MouseButton::Left);
+        let hit = {
+            let mouse = self.mouse.borrow();
+            if dragging {
+                if !mouse.dragging_input {
+                    return false;
+                }
+                mouse.input_area().map(|area| (area, MouseTarget::Input))
+            } else {
+                mouse.hit(Position::new(event.column, event.row))
+            }
+        };
+        if matches!(event.kind, MouseEventKind::Down(_)) {
+            self.mouse.borrow_mut().dragging_input = false;
+        }
+        let Some((area, target)) = hit else {
+            return false;
+        };
+        match target {
+            target @ (MouseTarget::ActivityList
+            | MouseTarget::ActivityItem(_)
+            | MouseTarget::ActivityDetail
+            | MouseTarget::ActivityTab(_)
+            | MouseTarget::ActivityBack
+            | MouseTarget::ActivityClose) => {
+                return ui::activity::handle_mouse(self, target, event.kind);
+            }
+            MouseTarget::Input
+                if dragging || event.kind == MouseEventKind::Down(MouseButton::Left) =>
+            {
+                self.focus = Focus::Input;
+                self.mouse.borrow_mut().dragging_input = true;
+                self.editor.move_to_position(
+                    area.width as usize,
+                    area.height as usize,
+                    event
+                        .row
+                        .clamp(area.y, area.bottom() - 1)
+                        .saturating_sub(area.y) as usize,
+                    event
+                        .column
+                        .clamp(area.x, area.right() - 1)
+                        .saturating_sub(area.x) as usize,
+                    dragging || event.modifiers.contains(KeyModifiers::SHIFT),
+                );
+            }
+            MouseTarget::Activity(key) if event.kind == MouseEventKind::Down(MouseButton::Left) => {
+                let mut overlay = ActivityOverlay::new(self.open_session(), Some(key));
+                overlay.detail_focus = true;
+                self.activity_overlay = Some(overlay);
+            }
+            MouseTarget::Messages | MouseTarget::Activity(_) => match event.kind {
+                MouseEventKind::ScrollUp => self.chat_view.borrow_mut().scroll_by(-3),
+                MouseEventKind::ScrollDown => self.chat_view.borrow_mut().scroll_by(3),
+                _ => return false,
+            },
+            MouseTarget::Session(id) if event.kind == MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = self.sessions.iter().position(|session| session.id == id) {
+                    self.sidebar_pos = index;
+                    self.switch_session(&id);
+                }
+            }
+            MouseTarget::Sessions | MouseTarget::Session(_) => {
+                self.focus = Focus::Sidebar;
+                match event.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.sidebar_pos = self.sidebar_pos.saturating_sub(3);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.sidebar_pos =
+                            (self.sidebar_pos + 3).min(self.sessions.len().saturating_sub(1));
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {}
+                    _ => return false,
+                }
+            }
+            MouseTarget::Settings if event.kind == MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_sidebar_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// 输入框焦点下的按键。
@@ -2586,10 +2704,10 @@ impl App {
                 self.editor.clear();
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_add(8);
+                self.chat_view.borrow_mut().scroll_by(-8);
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_sub(8);
+                self.chat_view.borrow_mut().scroll_by(8);
             }
             KeyCode::Char(c) if plain => {
                 let mut encoded = [0u8; 4];
@@ -2603,8 +2721,8 @@ impl App {
         self.open_session()
             .messages
             .iter()
-            .filter(|message| message.role == Role::User && !message.content.trim().is_empty())
-            .map(|message| message.content.clone())
+            .filter(|message| message.role == Role::User && !message.content().trim().is_empty())
+            .map(|message| message.content().clone())
             .collect()
     }
 
@@ -2737,6 +2855,8 @@ impl App {
                 let mcp_scope_changed = self.settings.mcp_servers != modal.draft.mcp_servers
                     || self.settings.proxy != modal.draft.proxy;
                 self.settings = modal.draft;
+                self.sparkle
+                    .set_enabled(self.settings.whimsy, Instant::now());
                 if mcp_scope_changed {
                     let runtime_mcp_servers = self.settings.runtime_mcp_servers();
                     self.mcp_registry
@@ -3319,6 +3439,7 @@ impl App {
                 SettingsField::Language => modal.draft.language = modal.draft.language.toggle(),
                 SettingsField::Theme => modal.draft.theme = modal.draft.theme.next(),
                 SettingsField::TitanArt => modal.draft.show_titan = !modal.draft.show_titan,
+                SettingsField::Whimsy => modal.draft.whimsy = !modal.draft.whimsy,
             },
             _ => {}
         }
@@ -3945,7 +4066,7 @@ mod tests {
             .find(|session| session.id == "session-a/invalid")
             .unwrap();
         assert_eq!(source.messages[0].role, Role::Assistant);
-        assert_eq!(source.messages[0].content, "reply");
+        assert_eq!(source.messages[0].content(), "reply");
         assert_eq!(
             source.messages[0].model.as_ref().unwrap().model,
             app.settings.model
@@ -3960,15 +4081,15 @@ mod tests {
         app.on_system_event(71, "response.queued".to_owned());
 
         let message = app.sessions[0].messages.last().unwrap();
-        assert!(message.content.is_empty());
+        assert!(message.content().is_empty());
         assert!(matches!(
-            &message.parts[0],
-            crate::runtime::conversation::MessagePart::Reasoning { content }
+            &message.blocks[0].kind,
+            crate::session::BlockKind::Reasoning { content, .. }
                 if content == "plan"
         ));
         assert!(matches!(
-            &message.parts[1],
-            crate::runtime::conversation::MessagePart::System { message }
+            &message.blocks[1].kind,
+            crate::session::BlockKind::System { message }
                 if message == "response.queued"
         ));
     }
@@ -4088,6 +4209,77 @@ mod tests {
         app.modal = Some(SettingsUi::new(app.settings.clone()));
         app.modal.as_mut().unwrap().sync_id = Some(1);
         assert!(app.periodic_tick_required());
+    }
+
+    #[tokio::test]
+    async fn sparkle_survives_typing_paste_and_cursor_movement() {
+        use crate::ui::sparkle::render_for_test;
+        use crossterm::event::Event as TerminalEvent;
+        use std::time::Duration;
+
+        let mut app = App::new(
+            Settings {
+                whimsy: true,
+                ..Settings::default()
+            },
+            vec![session("sparkle/unsaved")],
+        );
+        let uninterrupted = Sparkle::new(true);
+        let started = Instant::now();
+        render_for_test(&app.sparkle, &app.editor, started, true);
+        render_for_test(&uninterrupted, &app.editor, started, true);
+        let key = |code| TerminalEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        for (index, event) in [
+            key(KeyCode::Char('q')),
+            key(KeyCode::Char('e')),
+            key(KeyCode::Left),
+            key(KeyCode::Right),
+            key(KeyCode::Backspace),
+            TerminalEvent::Paste("e  你好\npasted text".to_owned()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            match event {
+                TerminalEvent::Key(key) => app.handle_key_events(key).unwrap(),
+                TerminalEvent::Paste(text) => app.handle_paste(text),
+                _ => unreachable!(),
+            }
+            assert!(ui::input_is_focused(&app));
+            let now = started + Duration::from_secs(2 + index as u64 * 4);
+            let expected = render_for_test(&uninterrupted, &app.editor, now, true);
+            assert!(expected.content.iter().any(|cell| cell.symbol() != " "));
+            assert_eq!(
+                render_for_test(&app.sparkle, &app.editor, now, true),
+                expected
+            );
+            assert_eq!(app.sparkle.next_frame(), uninterrupted.next_frame());
+        }
+        assert_eq!(app.editor.text(), "qe  你好\npasted text");
+    }
+
+    #[tokio::test]
+    async fn live_whimsy_updates_preserve_other_settings_and_unsaved_appearance_edits() {
+        let mut app = test_app();
+        let original = app.settings.clone();
+        app.modal = Some(SettingsUi::new(app.settings.clone()));
+        app.handle_app_event(AppEvent::WhimsyChanged(true));
+        assert!(app.settings.whimsy);
+        assert!(app.modal.as_ref().unwrap().draft.whimsy);
+        assert!(!app.periodic_tick_required());
+        assert_eq!(app.ticks, 0);
+        let mut expected = original;
+        expected.whimsy = true;
+        assert_eq!(app.settings, expected);
+
+        app.modal.as_mut().unwrap().appearance_pos = SettingsField::ALL.len() - 1;
+        app.handle_appearance_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.modal.as_ref().unwrap().draft.whimsy);
+        app.handle_app_event(AppEvent::WhimsyChanged(true));
+        assert!(!app.modal.as_ref().unwrap().draft.whimsy);
+        app.handle_app_event(AppEvent::WhimsyChanged(false));
+        assert!(!app.settings.whimsy);
+        assert!(!app.modal.as_ref().unwrap().draft.whimsy);
     }
 
     #[tokio::test]
@@ -4427,7 +4619,7 @@ mod tests {
             .iter()
             .find(|session| session.id == "session-a/invalid")
             .unwrap();
-        assert_eq!(source.messages.last().unwrap().content, "partial");
+        assert_eq!(source.messages.last().unwrap().content(), "partial");
     }
 
     #[test]
@@ -4500,11 +4692,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn f3_toggles_tool_details_only_when_results_exist() {
+    async fn f3_opens_an_independent_process_browser() {
         let mut app = test_app();
         app.handle_key_events(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
             .unwrap();
-        assert!(!app.tool_details_expanded());
+        assert!(app.activity_overlay.as_ref().unwrap().selected.is_none());
+        app.handle_key_events(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
+            .unwrap();
 
         app.sessions[0].messages.push(Message::assistant_streaming(
             app.settings.default_selection(),
@@ -4523,10 +4717,10 @@ mod tests {
 
         app.handle_key_events(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
             .unwrap();
-        assert!(app.tool_details_expanded());
+        assert!(app.activity_overlay.as_ref().unwrap().selected.is_some());
         app.handle_key_events(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
             .unwrap();
-        assert!(!app.tool_details_expanded());
+        assert!(app.activity_overlay.is_none());
     }
 
     #[tokio::test]
@@ -4626,7 +4820,7 @@ mod tests {
                 ..crate::config::ModelParameters::default()
             },
         );
-        partial.content = "saved partial".to_owned();
+        partial.append_text("saved partial");
         first.messages.push(partial);
         let mut second = session("recovery-b-invalid");
         second
@@ -4666,7 +4860,7 @@ mod tests {
                 ..crate::config::ModelParameters::default()
             },
         );
-        message.content = "searchable body".to_owned();
+        message.append_text("searchable body");
         message.status = MessageStatus::Failed;
         app.sessions[0].messages.push(message);
 

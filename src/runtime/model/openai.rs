@@ -191,7 +191,7 @@ fn openai_chat_messages(history: &[Message]) -> Vec<Value> {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                 },
-                "content": message.content,
+                "content": message.content(),
             })
         })
         .collect()
@@ -200,7 +200,7 @@ fn openai_chat_messages(history: &[Message]) -> Vec<Value> {
 fn openai_response_items(history: &[Message]) -> Vec<Value> {
     history
         .iter()
-        .filter(|message| message.role == Role::User || !message.content.is_empty())
+        .filter(|message| message.role == Role::User || !message.content().is_empty())
         .map(|message| {
             serde_json::json!({
                 "type": "message",
@@ -208,7 +208,7 @@ fn openai_response_items(history: &[Message]) -> Vec<Value> {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                 },
-                "content": message.content,
+                "content": message.content(),
             })
         })
         .collect()
@@ -421,6 +421,19 @@ struct PartialToolCall {
     arguments: String,
 }
 
+impl PartialToolCall {
+    fn event(&self, index: usize, arguments: String, replace: bool) -> ModelStreamEvent {
+        ModelStreamEvent::ToolCallDelta {
+            round: 0,
+            index,
+            call_id: self.id.clone(),
+            name: self.name.clone(),
+            arguments,
+            replace,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenAiUsage {
     #[serde(default)]
@@ -471,10 +484,6 @@ impl ChatStreamState {
             });
         }
         for choice in chunk.choices {
-            if let Some(text) = choice.delta.content {
-                self.assistant_text.push_str(&text);
-                emit(ModelStreamEvent::AssistantTextDelta { text });
-            }
             if let Some(text) = choice.delta.reasoning_content {
                 self.reasoning_content.push_str(&text);
                 emit(ModelStreamEvent::ReasoningDelta { text });
@@ -483,14 +492,21 @@ impl ChatStreamState {
                 self.reasoning.push_str(&text);
                 emit(ModelStreamEvent::ReasoningDelta { text });
             }
+            if let Some(text) = choice.delta.content {
+                self.assistant_text.push_str(&text);
+                emit(ModelStreamEvent::AssistantTextDelta { text });
+            }
             for (position, delta) in choice.delta.tool_calls.into_iter().enumerate() {
                 if delta.id.is_none() && delta.function.is_none() {
                     continue;
                 }
-                let partial = self
-                    .tool_calls
-                    .entry(delta.index.unwrap_or(position))
-                    .or_default();
+                let index = delta.index.unwrap_or(position);
+                let arguments = delta
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.arguments.clone())
+                    .unwrap_or_default();
+                let partial = self.tool_calls.entry(index).or_default();
                 if let Some(id) = delta.id {
                     partial.id.push_str(&id);
                 }
@@ -502,8 +518,10 @@ impl ChatStreamState {
                         partial.arguments.push_str(&arguments);
                     }
                 }
+                emit(partial.event(index, arguments, false));
             }
             if let Some(function) = choice.delta.function_call {
+                let arguments = function.arguments.clone().unwrap_or_default();
                 self.legacy_function_call = true;
                 let partial = self.tool_calls.entry(0).or_default();
                 if partial.id.is_empty() {
@@ -515,6 +533,7 @@ impl ChatStreamState {
                 if let Some(arguments) = function.arguments {
                     partial.arguments.push_str(&arguments);
                 }
+                emit(partial.event(0, arguments, false));
             }
             if let Some(reason) = choice.finish_reason {
                 let reason = match reason.as_str() {
@@ -622,6 +641,7 @@ fn finish_tool_calls(
                 partial.id
             };
             Ok(ToolCall {
+                index,
                 provider_id: Some(id.clone()),
                 id,
                 name: partial.name,
@@ -678,30 +698,31 @@ impl ResponsesStreamState {
             }
             responses::ResponseStreamEvent::ResponseOutputItemAdded(event) => {
                 if let responses::OutputItem::FunctionCall(call) = event.item {
-                    self.record_function_call(
+                    emit(self.record_function_call(
                         event.output_index as usize,
                         call.call_id,
                         call.name,
                         call.arguments,
-                    );
+                    ));
                 }
             }
             responses::ResponseStreamEvent::ResponseOutputItemDone(event) => {
                 if let responses::OutputItem::FunctionCall(call) = event.item {
-                    self.record_function_call(
+                    emit(self.record_function_call(
                         event.output_index as usize,
                         call.call_id,
                         call.name,
                         call.arguments,
-                    );
+                    ));
                 }
             }
             responses::ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(event) => {
-                self.tool_calls
+                let partial = self
+                    .tool_calls
                     .entry(event.output_index as usize)
-                    .or_default()
-                    .arguments
-                    .push_str(&event.delta);
+                    .or_default();
+                partial.arguments.push_str(&event.delta);
+                emit(partial.event(event.output_index as usize, event.delta, false));
             }
             responses::ResponseStreamEvent::ResponseFunctionCallArgumentsDone(event) => {
                 let partial = self
@@ -712,6 +733,7 @@ impl ResponsesStreamState {
                 if let Some(name) = event.name {
                     partial.name = name;
                 }
+                emit(partial.event(event.output_index as usize, partial.arguments.clone(), true));
             }
             responses::ResponseStreamEvent::ResponseCompleted(event) => {
                 self.provider_state = Some(
@@ -720,12 +742,12 @@ impl ResponsesStreamState {
                 );
                 for (index, item) in event.response.output.iter().enumerate() {
                     if let responses::OutputItem::FunctionCall(call) = item {
-                        self.record_function_call(
+                        emit(self.record_function_call(
                             index,
                             call.call_id.clone(),
                             call.name.clone(),
                             call.arguments.clone(),
-                        );
+                        ));
                     }
                 }
                 self.usage = event.response.usage.map(|usage| Usage {
@@ -760,11 +782,12 @@ impl ResponsesStreamState {
         call_id: String,
         name: String,
         arguments: String,
-    ) {
+    ) -> ModelStreamEvent {
         let partial = self.tool_calls.entry(index).or_default();
         partial.id = call_id;
         partial.name = name;
         partial.arguments = arguments;
+        partial.event(index, partial.arguments.clone(), true)
     }
 
     fn finish(self) -> Result<Completion> {
@@ -1085,13 +1108,14 @@ mod tests {
     }
 
     #[test]
-    fn chat_reasoning_is_structured_and_extra_delta_fields_are_ignored() {
+    fn chat_reasoning_and_tool_deltas_are_structured_and_unknown_fields_are_ignored() {
         let event = SseEvent {
             event: None,
             data: serde_json::json!({
                 "choices": [{
                     "delta": {
                         "reasoning_content": "plan",
+                        "future_delta": "ignored",
                         "tool_calls": [{
                             "id": "call-1",
                             "function": {
@@ -1112,7 +1136,18 @@ mod tests {
             &emitted[0],
             ModelStreamEvent::ReasoningDelta { text } if text == "plan"
         ));
-        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted.len(), 2);
+        assert!(matches!(
+            &emitted[1],
+            ModelStreamEvent::ToolCallDelta {
+                round: 0,
+                index: 0,
+                call_id,
+                name,
+                arguments,
+                replace: false,
+            } if call_id == "call-1" && name == "search" && arguments == r#"{"q":"#
+        ));
     }
 
     #[test]
@@ -1230,6 +1265,7 @@ mod tests {
 
         let round = ToolRound {
             calls: vec![ToolCall {
+                index: 0,
                 id: "call-1".to_owned(),
                 provider_id: Some("call-1".to_owned()),
                 name: "mcp_docs__search".to_owned(),

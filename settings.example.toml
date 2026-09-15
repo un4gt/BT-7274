@@ -7,6 +7,7 @@ model = "gemini-2.5-flash"
 language = "zh"      # zh / en
 theme = "vanguard"  # vanguard / carbon / paper
 show_titan = false
+whimsy = false     # 输入框星空；运行中改为 true/false，约 1 秒内生效
 
 [[providers]]
 id = "provider-gemini"

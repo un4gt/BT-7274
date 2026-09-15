@@ -1,6 +1,6 @@
 //! Unicode-aware multiline chat editor state and viewport layout.
 
-use std::ops::Range;
+use std::{cell::Cell, ops::Range};
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -9,11 +9,13 @@ use unicode_width::UnicodeWidthStr;
 pub struct EditorCell {
     pub text: String,
     pub selected: bool,
+    byte: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditorRow {
     pub cells: Vec<EditorCell>,
+    end: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,6 +34,7 @@ pub struct ChatEditor {
     history_index: Option<usize>,
     history_draft: Option<String>,
     preferred_column: Option<usize>,
+    viewport_start: Cell<usize>,
 }
 
 impl ChatEditor {
@@ -227,6 +230,31 @@ impl ChatEditor {
         self.preferred_column = None;
     }
 
+    /// Move to a terminal cell using the same grapheme layout as the rendered input.
+    pub fn move_to_position(
+        &mut self,
+        width: usize,
+        height: usize,
+        row: usize,
+        column: usize,
+        extend: bool,
+    ) {
+        let viewport = self.viewport(width, height);
+        let Some(row) = viewport.rows.get(row).or_else(|| viewport.rows.last()) else {
+            return;
+        };
+        let mut target = row.end;
+        let mut left = 0;
+        for cell in &row.cells {
+            left += cell.text.width().max(1);
+            if column < left {
+                target = cell.byte;
+                break;
+            }
+        }
+        self.move_cursor(target, extend);
+    }
+
     pub fn viewport(&self, width: usize, height: usize) -> EditorViewport {
         if width == 0 || height == 0 {
             return EditorViewport::default();
@@ -250,9 +278,11 @@ impl ChatEditor {
                 if wrapped_at_line_start {
                     wrapped_at_line_start = false;
                 } else {
+                    rows[row].end = byte;
                     rows.push(EditorRow::default());
                     row += 1;
                 }
+                rows[row].end = next_byte;
                 column = 0;
                 continue;
             }
@@ -261,7 +291,10 @@ impl ChatEditor {
             let grapheme_width = display.width().max(1);
             wrapped_at_line_start = false;
             if column > 0 && column.saturating_add(grapheme_width) > width {
-                rows.push(EditorRow::default());
+                rows.push(EditorRow {
+                    end: byte,
+                    ..EditorRow::default()
+                });
                 row += 1;
                 column = 0;
             }
@@ -274,10 +307,15 @@ impl ChatEditor {
             rows[row].cells.push(EditorCell {
                 text: display,
                 selected,
+                byte,
             });
+            rows[row].end = next_byte;
             column = column.saturating_add(grapheme_width);
             if column >= width {
-                rows.push(EditorRow::default());
+                rows.push(EditorRow {
+                    end: next_byte,
+                    ..EditorRow::default()
+                });
                 row += 1;
                 column = 0;
                 wrapped_at_line_start = true;
@@ -285,10 +323,16 @@ impl ChatEditor {
         }
         let (cursor_row, cursor_column) = cursor_position.unwrap_or((row, column));
         let total_rows = rows.len();
-        let start = cursor_row
-            .saturating_add(1)
-            .saturating_sub(height)
+        let mut start = self
+            .viewport_start
+            .get()
             .min(total_rows.saturating_sub(height.min(total_rows)));
+        if cursor_row < start {
+            start = cursor_row;
+        } else if cursor_row >= start + height {
+            start = cursor_row + 1 - height;
+        }
+        self.viewport_start.set(start);
         let visible_rows = rows.into_iter().skip(start).take(height).collect();
         EditorViewport {
             rows: visible_rows,
@@ -520,5 +564,41 @@ mod tests {
 
         assert_eq!(viewport.cursor_row, 1);
         assert_eq!(viewport.cursor_column, 0);
+    }
+
+    #[test]
+    fn mouse_position_handles_wrapping_tabs_and_empty_lines() {
+        let mut editor = ChatEditor::default();
+        editor.set_text("ab你c\n👩‍💻e\u{301}\n\n\tZ");
+        editor.move_to_position(5, 8, 0, 3, false);
+        assert_eq!(editor.cursor(), "ab".len());
+        editor.move_to_position(5, 8, 1, 1, false);
+        assert_eq!(editor.cursor(), "ab你c\n".len());
+        editor.move_to_position(5, 8, 1, 2, true);
+        assert_eq!(editor.selected_text(), Some("👩‍💻"));
+        editor.move_to_position(5, 8, 2, 4, false);
+        assert_eq!(editor.cursor(), "ab你c\n👩‍💻e\u{301}\n".len());
+        editor.move_to_position(5, 8, 3, 0, false);
+        assert_eq!(editor.cursor(), "ab你c\n👩‍💻e\u{301}\n\n".len());
+        editor.move_to_position(5, 8, 7, 4, false);
+        assert_eq!(editor.cursor(), editor.text().len());
+
+        editor.set_text("ab你");
+        editor.move_to_position(3, 4, 0, 2, false);
+        assert_eq!(editor.cursor(), 2);
+        editor.move_to_position(3, 4, 1, 1, false);
+        assert_eq!(editor.cursor(), 2);
+    }
+
+    #[test]
+    fn clicking_a_scrolled_input_keeps_the_visible_rows_stable() {
+        let mut editor = ChatEditor::default();
+        editor.set_text("zero\none\ntwo\nthree\nfour");
+        let before = editor.viewport(10, 3);
+        editor.move_to_position(10, 3, 0, 1, false);
+        assert_eq!(editor.cursor(), "zero\none\nt".len());
+        let after = editor.viewport(10, 3);
+        assert_eq!(before.rows, after.rows);
+        assert_eq!(after.cursor_row, 0);
     }
 }

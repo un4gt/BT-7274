@@ -13,9 +13,12 @@ Gateway 使用 Gemini 模型但调用 OpenAI Chat Completions 端点时，应配
 `api_kind = "chat_completions"`，工具也会使用 OpenAI 格式；只有 Gateway 暴露 Gemini
 GenerateContent 端点时才选择 `gemini_generate_content`。
 
-统一流事件包含 assistant text、reasoning、system、tool call、tool result、completed、error
+统一流事件包含 assistant text、reasoning、system、tool 参数增量/准备完成、tool call、tool result、completed、error
 和 cancelled。Provider 原生 payload 必须先映射为该契约，不能把 reasoning、工具结果或系
 统状态拼进正文。
+
+工具参数分片立即进入准备状态；完整调用经过协议校验后进入等待执行和运行状态。界面按
+轮次与调用索引归并记录，执行结果回填原块；Provider 的 `call_id` 继续用于协议原样回传。
 
 普通历史只包含 user/assistant 对话正文。本轮 MCP 循环会精确编码工具定义、assistant 工具
 调用和工具结果；完成后的工具轨迹作为结构化会话片段保存，但不会在以后轮次重复发送。

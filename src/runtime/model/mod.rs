@@ -115,16 +115,29 @@ pub enum ModelStreamEvent {
     System {
         message: String,
     },
-    ToolCall {
+    ToolCallDelta {
+        round: usize,
+        index: usize,
+        call_id: String,
+        name: String,
+        arguments: String,
+        replace: bool,
+    },
+    ToolCallReady {
+        round: usize,
+        index: usize,
         call_id: String,
         server: String,
         name: String,
         arguments: Value,
     },
+    ToolCall {
+        round: usize,
+        index: usize,
+    },
     ToolResult {
-        call_id: String,
-        server: String,
-        name: String,
+        round: usize,
+        index: usize,
         output: Value,
         is_error: bool,
     },
@@ -184,6 +197,7 @@ impl Default for RequestFeatures {
 #[derive(Clone)]
 pub(crate) struct StreamSink {
     stream_id: u64,
+    round_index: usize,
     sender: mpsc::UnboundedSender<Event>,
     started: Instant,
     metrics: Arc<Mutex<MetricsState>>,
@@ -200,7 +214,17 @@ impl StreamSink {
         }
     }
 
-    fn emit(&self, event: ModelStreamEvent) {
+    fn for_round(&self, round_index: usize) -> Self {
+        Self {
+            round_index,
+            ..self.clone()
+        }
+    }
+
+    fn emit(&self, mut event: ModelStreamEvent) {
+        if let ModelStreamEvent::ToolCallDelta { round, .. } = &mut event {
+            *round = self.round_index;
+        }
         if matches!(
             &event,
             ModelStreamEvent::AssistantTextDelta { text }
@@ -402,6 +426,7 @@ pub fn spawn_stream_reply(
     tokio::spawn(async move {
         let started = Instant::now();
         let sink = StreamSink {
+            round_index: 0,
             stream_id,
             sender: sender.clone(),
             started,
@@ -487,7 +512,7 @@ pub fn spawn_stream_reply(
                             cancellation: &cancellation,
                         };
                         let mut completion = adapter_for(provider.api_kind)
-                            .stream_reply(request, sink.clone())
+                            .stream_reply(request, sink.for_round(round_index))
                             .await?;
                         merge_usage(&mut total_usage, completion.usage);
                         if completion.tool_calls.is_empty() {
@@ -523,11 +548,19 @@ pub fn spawn_stream_reply(
                                 .map(|tool| tool.remote_name.as_str())
                                 .unwrap_or(&call.name);
                             let remote_name = display_tool_name(remote_name);
-                            sink.emit(ModelStreamEvent::ToolCall {
+                            sink.emit(ModelStreamEvent::ToolCallReady {
+                                round: round_index,
+                                index: call.index,
                                 call_id: call.id.clone(),
                                 server: server.clone(),
                                 name: remote_name.clone(),
                                 arguments: call.arguments.clone(),
+                            });
+                        }
+                        for call in &calls {
+                            sink.emit(ModelStreamEvent::ToolCall {
+                                round: round_index,
+                                index: call.index,
                             });
                             let result = match mcp_registry.call_tool(call, &cancellation).await {
                                 Ok(result) => result,
@@ -542,9 +575,8 @@ pub fn spawn_stream_reply(
                                 },
                             };
                             sink.emit(ModelStreamEvent::ToolResult {
-                                call_id: result.call_id.clone(),
-                                server,
-                                name: remote_name,
+                                round: round_index,
+                                index: call.index,
                                 output: result.output.clone(),
                                 is_error: result.is_error,
                             });
@@ -1072,6 +1104,7 @@ mod tests {
     fn stream_metrics_capture_request_id_ttft_and_partial_output() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let sink = StreamSink {
+            round_index: 0,
             stream_id: 7,
             sender,
             started: Instant::now(),

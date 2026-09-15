@@ -20,7 +20,12 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::DisableBracketedPaste,
+            crossterm::event::DisableFocusChange,
+            crossterm::event::DisableMouseCapture
+        );
         ratatui::restore();
     }
 }
@@ -71,10 +76,14 @@ async fn run_app() -> color_eyre::Result<()> {
     })?;
     // 开启括号粘贴：终端把一次粘贴作为单一 Paste 事件发给应用，
     // 而不是退化成逐字符按键（避免粘贴内容里的 j/k 等被当作导航键）
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste).inspect_err(
-        |_| {
-            tracing::error!(stage = "bracketed_paste", "终端初始化阶段失败");
-        },
-    )?;
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableBracketedPaste,
+        crossterm::event::EnableFocusChange,
+        crossterm::event::EnableMouseCapture
+    )
+    .inspect_err(|_| {
+        tracing::error!(stage = "bracketed_paste", "终端初始化阶段失败");
+    })?;
     App::new(settings, sessions).run(terminal).await
 }

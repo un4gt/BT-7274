@@ -398,7 +398,7 @@ pub(crate) fn wrap_styled_line(line: &Line<'_>, width: usize) -> Vec<Line<'stati
     rows
 }
 
-fn crop_line(
+pub(crate) fn crop_line(
     line: &Line<'_>,
     horizontal_offset: usize,
     width: usize,

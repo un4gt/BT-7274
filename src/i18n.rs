@@ -407,6 +407,7 @@ pub struct Texts {
     pub field_language: &'static str,
     pub field_theme: &'static str,
     pub field_titan_art: &'static str,
+    pub field_whimsy: &'static str,
     pub value_on: &'static str,
     pub value_off: &'static str,
     pub settings_toggle_hint: &'static str,
@@ -488,6 +489,7 @@ impl Texts {
         field_language: "语言",
         field_theme: "主题",
         field_titan_art: "泰坦背景",
+        field_whimsy: "输入框星空",
         value_on: "开",
         value_off: "关",
         settings_toggle_hint: "Enter 切换",
@@ -565,6 +567,7 @@ impl Texts {
         field_language: "Language",
         field_theme: "Theme",
         field_titan_art: "Titan Art",
+        field_whimsy: "Input Stars",
         value_on: "on",
         value_off: "off",
         settings_toggle_hint: "Enter to toggle",
@@ -603,6 +606,7 @@ Output only the title itself: no explanations, quotes, or punctuation.",
             SettingsField::Language => self.field_language,
             SettingsField::Theme => self.field_theme,
             SettingsField::TitanArt => self.field_titan_art,
+            SettingsField::Whimsy => self.field_whimsy,
         }
     }
 

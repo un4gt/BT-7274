@@ -932,6 +932,7 @@ mod tests {
             )
         );
         let call = ToolCall {
+            index: 0,
             id: "call-1".to_owned(),
             provider_id: Some("call-1".to_owned()),
             name: weather.model_name.clone(),

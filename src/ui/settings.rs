@@ -888,7 +888,7 @@ fn render_network(
         texts.network_field_label(NetworkField::ProxyUrl),
         width = LABEL_WIDTH
     );
-    let value_col = 2 + prefix.chars().count();
+    let value_col = 2 + prefix.width();
     let available = (area.width as usize).saturating_sub(value_col + 1);
     let (value, cursor_col) = if modal.proxy_editing {
         visible_slice_with_cursor(&modal.proxy_edit.buffer, modal.proxy_edit.cursor, available)
@@ -1185,6 +1185,11 @@ fn render_appearance(
         } else {
             texts.value_off
         },
+        if modal.draft.whimsy {
+            texts.value_on
+        } else {
+            texts.value_off
+        },
     ];
     let value_colors = [
         palette.primary,
@@ -1194,8 +1199,22 @@ fn render_appearance(
         } else {
             palette.muted
         },
+        if modal.draft.whimsy {
+            palette.success
+        } else {
+            palette.muted
+        },
     ];
-    for (index, field) in SettingsField::ALL.iter().enumerate() {
+    let visible = usize::from(area.height.saturating_sub(1))
+        .div_ceil(stride)
+        .max(1);
+    let start = modal.appearance_pos.saturating_sub(visible - 1);
+    for (index, field) in SettingsField::ALL
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+    {
         let selected = index == modal.appearance_pos;
         let label = Span::styled(
             format!(
@@ -1230,7 +1249,10 @@ fn render_appearance(
         } else {
             palette.surface()
         });
-        Paragraph::new(line).render(vertical_slice(area, 1 + index as u16 * stride, 1), buf);
+        Paragraph::new(line).render(
+            vertical_slice(area, 1 + ((index - start) * stride) as u16, 1),
+            buf,
+        );
     }
 }
 
@@ -1243,8 +1265,8 @@ fn render_manual_line(
     palette: Palette,
 ) {
     let prefix = format!("{label}: ");
-    let prefix_len = prefix.chars().count();
-    let avail = (area.width as usize).saturating_sub(prefix_len + 1);
+    let prefix_width = prefix.width();
+    let avail = (area.width as usize).saturating_sub(prefix_width + 1);
     let (visible, col) = visible_slice_with_cursor(&edit.buffer, edit.cursor, avail);
     let line = Line::from(vec![
         Span::styled(prefix, palette.surface().fg(palette.primary)),
@@ -1255,7 +1277,7 @@ fn render_manual_line(
         .render(area, frame.buffer_mut());
     if area.width > 0 && area.height > 0 {
         frame.set_cursor_position(Position::new(
-            area.x + ((prefix_len + col) as u16).min(area.width - 1),
+            area.x + ((prefix_width + col) as u16).min(area.width - 1),
             area.y,
         ));
     }
@@ -1326,7 +1348,7 @@ fn render_mcp_wizard(frame: &mut Frame, wizard: &McpServerWizard, lang: Lang, pa
     {
         let row_y = inner.y.saturating_add(display_row as u16 * stride);
         let selected = wizard.field == index;
-        let available = (inner.width as usize).saturating_sub(value_col).max(1);
+        let available = (inner.width as usize).saturating_sub(value_col + 1);
         let masked;
         let buffer = if wizard.sensitive_field(index) {
             masked = vec!['•'; wizard.line(index).buffer.len()];
@@ -1483,9 +1505,10 @@ fn render_wizard(
                 texts.wizard_key.to_owned(),
                 texts.wizard_headers.to_owned(),
             ];
-            let value_col = 2 + LABEL_WIDTH + 2;
             let mut cursor: Option<Position> = None;
             for (index, label) in labels.iter().enumerate() {
+                let prefix = format!("{:>width$}  ", label, width = LABEL_WIDTH);
+                let value_col = 2 + prefix.width();
                 let selected = index == wizard.field;
                 let row = Rect {
                     y: inner.y + 1 + index as u16 * 2,
@@ -1515,7 +1538,7 @@ fn render_wizard(
                             .bg(palette.surface),
                     ),
                     Span::styled(
-                        format!("{:>width$}  ", label, width = LABEL_WIDTH),
+                        prefix,
                         Style::default()
                             .fg(palette.primary)
                             .bg(palette.surface)

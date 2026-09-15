@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use crate::config::{ModelParameters, ModelSelection};
+#[cfg(test)]
+use crate::config::ModelParameters;
+use crate::config::ModelSelection;
+#[cfg(test)]
 use crate::runtime::error::RuntimeErrorSnapshot;
 use crate::secret::{SecretRedactor, redact_json};
 use crate::storage::atomic_write_private;
@@ -39,156 +42,8 @@ pub enum IncompleteRecovery {
     Discard,
 }
 
-/// 助手消息中不能压成普通正文的结构化片段。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MessagePart {
-    Reasoning {
-        content: String,
-    },
-    System {
-        message: String,
-    },
-    ToolCall {
-        call_id: String,
-        server: String,
-        name: String,
-        arguments: serde_json::Value,
-    },
-    ToolResult {
-        call_id: String,
-        server: String,
-        name: String,
-        output: serde_json::Value,
-        is_error: bool,
-    },
-}
-
-/// 一条聊天消息。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<MessagePart>,
-    /// 本条消息所属轮次实际使用的 Provider/Model；旧会话缺失时为 `None`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<ModelSelection>,
-    /// 本轮实际使用的请求参数快照；旧会话缺失时为 `None`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<ModelParameters>,
-    #[serde(default)]
-    pub status: MessageStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure: Option<RuntimeErrorSnapshot>,
-}
-
-impl Message {
-    pub fn user(content: String, model: Option<ModelSelection>) -> Self {
-        Self {
-            role: Role::User,
-            content,
-            parts: Vec::new(),
-            model,
-            parameters: None,
-            status: MessageStatus::Completed,
-            failure: None,
-        }
-    }
-
-    pub fn user_with_request(
-        content: String,
-        model: ModelSelection,
-        parameters: ModelParameters,
-    ) -> Self {
-        Self {
-            role: Role::User,
-            content,
-            parts: Vec::new(),
-            model: Some(model),
-            parameters: Some(parameters),
-            status: MessageStatus::Completed,
-            failure: None,
-        }
-    }
-
-    pub fn assistant_streaming(model: ModelSelection) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: String::new(),
-            parts: Vec::new(),
-            model: Some(model),
-            parameters: None,
-            status: MessageStatus::Streaming,
-            failure: None,
-        }
-    }
-
-    pub fn assistant_streaming_with_request(
-        model: ModelSelection,
-        parameters: ModelParameters,
-    ) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: String::new(),
-            parts: Vec::new(),
-            model: Some(model),
-            parameters: Some(parameters),
-            status: MessageStatus::Streaming,
-            failure: None,
-        }
-    }
-
-    pub fn append_reasoning(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        match self.parts.last_mut() {
-            Some(MessagePart::Reasoning { content }) => content.push_str(text),
-            _ => self.parts.push(MessagePart::Reasoning {
-                content: text.to_owned(),
-            }),
-        }
-    }
-
-    pub fn push_system_event(&mut self, message: String) {
-        if !message.is_empty() {
-            self.parts.push(MessagePart::System { message });
-        }
-    }
-
-    pub fn push_tool_call(
-        &mut self,
-        call_id: String,
-        server: String,
-        name: String,
-        arguments: serde_json::Value,
-    ) {
-        self.parts.push(MessagePart::ToolCall {
-            call_id,
-            server,
-            name,
-            arguments,
-        });
-    }
-
-    pub fn push_tool_result(
-        &mut self,
-        call_id: String,
-        server: String,
-        name: String,
-        output: serde_json::Value,
-        is_error: bool,
-    ) {
-        self.parts.push(MessagePart::ToolResult {
-            call_id,
-            server,
-            name,
-            output,
-            is_error,
-        });
-    }
-}
+mod message;
+pub use message::{BlockKind, Message, MessageBlock, ToolActivity, ToolStatus};
 
 /// 提取式压缩摘要。字段保持结构化，便于预览、回归测试和后续迁移。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -408,7 +263,7 @@ impl Session {
         self.messages
             .iter()
             .find(|m| m.role == Role::User)
-            .map(|m| m.content.split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|m| m.content().split_whitespace().collect::<Vec<_>>().join(" "))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| fallback.to_owned())
     }
@@ -422,9 +277,9 @@ impl Session {
             (user.role == Role::User
                 && assistant.role == Role::Assistant
                 && assistant.status == MessageStatus::Completed
-                && !user.content.trim().is_empty()
-                && !assistant.content.trim().is_empty())
-            .then(|| (user.content.clone(), assistant.content.clone()))
+                && !user.content().trim().is_empty()
+                && !assistant.content().trim().is_empty())
+            .then(|| (user.content().clone(), assistant.content().clone()))
         })
     }
 
@@ -473,7 +328,7 @@ impl Session {
             }
             IncompleteRecovery::Continue | IncompleteRecovery::Keep => {
                 let message = &mut self.messages[index];
-                message.status = MessageStatus::Cancelled;
+                message.finish(MessageStatus::Cancelled);
                 message.push_system_event(
                     match action {
                         IncompleteRecovery::Continue => "recovery.continued_after_restart",
@@ -491,71 +346,55 @@ impl Session {
 
 fn sanitize_messages(messages: &mut [Message], redactor: &SecretRedactor) {
     for message in messages {
-        message.content = redactor.redact(&message.content);
-        for part in &mut message.parts {
-            match part {
-                MessagePart::Reasoning { content } => {
+        for block in &mut message.blocks {
+            match &mut block.kind {
+                BlockKind::Text { content } | BlockKind::Reasoning { content, .. } => {
                     *content = redactor.redact(content);
                 }
-                MessagePart::System { message } => {
-                    *message = redactor.redact(message);
-                }
-                MessagePart::ToolCall { arguments, .. } => {
-                    *arguments = redact_json(arguments);
-                }
-                MessagePart::ToolResult { output, .. } => {
-                    *output = redact_json(output);
+                BlockKind::System { message } => *message = redactor.redact(message),
+                BlockKind::Tool { tool } => {
+                    tool.arguments_text = redactor.redact(&tool.arguments_text);
+                    if let Some(arguments) = &mut tool.arguments {
+                        *arguments = redact_json(arguments);
+                    }
+                    if let Some(output) = &mut tool.output {
+                        *output = redact_json(output);
+                    }
                 }
             }
+            block.revision += 1;
         }
     }
 }
 
 fn append_message_search_text(output: &mut String, message: &Message) {
-    output.push_str(&message.content);
-    output.push('\n');
     if let Some(model) = &message.model {
-        output.push_str(&model.provider_id);
-        output.push(' ');
-        output.push_str(&model.provider_name);
-        output.push(' ');
-        output.push_str(&model.model);
-        output.push('\n');
+        output.push_str(&format!(
+            "{} {} {}\n",
+            model.provider_id, model.provider_name, model.model
+        ));
     }
-    if let Some(parameters) = &message.parameters
-        && let Ok(parameters) = serde_json::to_string(parameters)
-    {
-        output.push_str(&parameters);
-        output.push('\n');
+    if let Some(parameters) = &message.parameters {
+        output.push_str(&serde_json::to_string(parameters).unwrap_or_default());
     }
     output.push_str(&format!("{:?}\n", message.status));
-    for part in &message.parts {
-        match part {
-            MessagePart::Reasoning { content } => output.push_str(content),
-            MessagePart::System { message } => output.push_str(message),
-            MessagePart::ToolCall {
-                server,
-                name,
-                arguments,
-                ..
-            } => {
-                output.push_str(server);
-                output.push(' ');
-                output.push_str(name);
-                output.push(' ');
-                output.push_str(&arguments.to_string());
+    for block in &message.blocks {
+        match &block.kind {
+            BlockKind::Text { content } | BlockKind::Reasoning { content, .. } => {
+                output.push_str(content)
             }
-            MessagePart::ToolResult {
-                server,
-                name,
-                output: tool_output,
-                ..
-            } => {
-                output.push_str(server);
-                output.push(' ');
-                output.push_str(name);
-                output.push(' ');
-                output.push_str(&tool_output.to_string());
+            BlockKind::System { message } => output.push_str(message),
+            BlockKind::Tool { tool } => {
+                output.push_str(&format!(
+                    "{}/{} {}\n",
+                    tool.server, tool.name, tool.arguments_text
+                ));
+                if let Some(arguments) = &tool.arguments {
+                    output.push_str(&arguments.to_string());
+                }
+                if let Some(result) = &tool.output {
+                    output.push_str(&result.to_string());
+                }
             }
         }
         output.push('\n');
@@ -577,6 +416,9 @@ fn load_session_file(path: &Path) -> Result<Session> {
         .context("会话文件名不是有效 ID")?;
     let raw = std::fs::read_to_string(path)?;
     let mut session: Session = serde_json::from_str(&raw)?;
+    for message in &mut session.messages {
+        message.recover_blocks();
+    }
     // 文件名是磁盘对象的真实标识，不能信任 JSON 内可被篡改的路径片段。
     session.id = id.to_owned();
     Ok(session)
@@ -601,24 +443,8 @@ mod tests {
     #[test]
     fn json_roundtrip() {
         let mut session = session_with_messages(vec![
-            Message {
-                role: Role::User,
-                content: "你好".to_owned(),
-                parts: Vec::new(),
-                model: None,
-                parameters: None,
-                status: MessageStatus::Completed,
-                failure: None,
-            },
-            Message {
-                role: Role::Assistant,
-                content: "你好！".to_owned(),
-                parts: Vec::new(),
-                model: None,
-                parameters: None,
-                status: MessageStatus::Completed,
-                failure: None,
-            },
+            Message::new(Role::User, "你好".to_owned(), None),
+            Message::new(Role::Assistant, "你好！".to_owned(), None),
         ]);
         session.title = Some("打招呼".to_owned());
         let raw = serde_json::to_string(&session).unwrap();
@@ -643,7 +469,8 @@ mod tests {
         assert!(session.messages[0].model.is_none());
         assert!(session.messages[0].parameters.is_none());
         assert_eq!(session.messages[0].status, MessageStatus::Completed);
-        assert!(session.messages[0].parts.is_empty());
+        assert_eq!(session.messages[0].content(), "hello");
+        assert!(!session.messages[0].legacy_order);
         assert!(session.messages[0].failure.is_none());
         assert!(session.summary.is_none());
         assert!(session.compactions.is_empty());
@@ -665,15 +492,8 @@ mod tests {
         assert_eq!(empty.display_title("新会话"), "新会话");
         assert_eq!(empty.display_title("New chat"), "New chat");
 
-        let titled = session_with_messages(vec![Message {
-            role: Role::User,
-            content: "第一句".to_owned(),
-            parts: Vec::new(),
-            model: None,
-            parameters: None,
-            status: MessageStatus::Completed,
-            failure: None,
-        }]);
+        let titled =
+            session_with_messages(vec![Message::new(Role::User, "第一句".to_owned(), None)]);
         assert_eq!(titled.display_title("新会话"), "第一句");
 
         let mut named = titled.clone();
@@ -684,42 +504,10 @@ mod tests {
     #[test]
     fn first_exchange_skips_unpaired_messages() {
         let session = session_with_messages(vec![
-            Message {
-                role: Role::Assistant,
-                content: "旧的回复".to_owned(),
-                parts: Vec::new(),
-                model: None,
-                parameters: None,
-                status: MessageStatus::Completed,
-                failure: None,
-            },
-            Message {
-                role: Role::User,
-                content: "没有得到回复的问题".to_owned(),
-                parts: Vec::new(),
-                model: None,
-                parameters: None,
-                status: MessageStatus::Completed,
-                failure: None,
-            },
-            Message {
-                role: Role::User,
-                content: "问题".to_owned(),
-                parts: Vec::new(),
-                model: None,
-                parameters: None,
-                status: MessageStatus::Completed,
-                failure: None,
-            },
-            Message {
-                role: Role::Assistant,
-                content: "回答".to_owned(),
-                parts: Vec::new(),
-                model: None,
-                parameters: None,
-                status: MessageStatus::Completed,
-                failure: None,
-            },
+            Message::new(Role::Assistant, "旧的回复".to_owned(), None),
+            Message::new(Role::User, "没有得到回复的问题".to_owned(), None),
+            Message::new(Role::User, "问题".to_owned(), None),
+            Message::new(Role::Assistant, "回答".to_owned(), None),
         ]);
         let (user, assistant) = session.first_exchange().unwrap();
         assert_eq!(user, "问题");
@@ -733,7 +521,7 @@ mod tests {
             provider_name: "Provider Test".to_owned(),
             model: "model-test".to_owned(),
         });
-        message.content = "partial".to_owned();
+        message.append_text("partial");
         message.parameters = Some(ModelParameters {
             temperature: Some(0.25),
             max_output_tokens: Some(1024),
@@ -764,18 +552,18 @@ mod tests {
         let parsed: Message = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed, message);
         assert!(matches!(
-            &parsed.parts[1],
-            MessagePart::System { message } if message == "response.queued"
+            &parsed.blocks[2].kind,
+            BlockKind::System { message } if message == "response.queued"
         ));
         assert!(matches!(
-            &parsed.parts[2],
-            MessagePart::ToolCall { name, arguments, .. }
-                if name == "search" && arguments["q"] == "rust"
+            &parsed.blocks[3].kind,
+            BlockKind::Tool { tool }
+                if tool.name == "search" && tool.arguments.as_ref().unwrap()["q"] == "rust"
         ));
         assert!(matches!(
-            &parsed.parts[3],
-            MessagePart::ToolResult { output, is_error, .. }
-                if !is_error && output["answer"] == "found"
+            &parsed.blocks[3].kind,
+            BlockKind::Tool { tool }
+                if tool.status == ToolStatus::Succeeded && tool.output.as_ref().unwrap()["answer"] == "found"
         ));
         assert_eq!(
             parsed
@@ -873,7 +661,7 @@ mod tests {
                 ..ModelParameters::default()
             },
         );
-        partial.content = "partial reply".to_owned();
+        partial.append_text("partial reply");
         source.messages.push(partial);
         let raw = serde_json::to_string(&source).unwrap();
         let loaded: Session = serde_json::from_str(&raw).unwrap();
@@ -890,15 +678,15 @@ mod tests {
         assert!(kept.resolve_incomplete(0, IncompleteRecovery::Keep));
         assert_eq!(kept.messages[0].status, MessageStatus::Cancelled);
         assert!(matches!(
-            kept.messages[0].parts.last(),
-            Some(MessagePart::System { message }) if message == "recovery.kept_after_restart"
+            kept.messages[0].blocks.last().map(|block| &block.kind),
+            Some(BlockKind::System { message }) if message == "recovery.kept_after_restart"
         ));
 
         let mut continued = loaded.clone();
         assert!(continued.resolve_incomplete(0, IncompleteRecovery::Continue));
         assert!(matches!(
-            continued.messages[0].parts.last(),
-            Some(MessagePart::System { message }) if message == "recovery.continued_after_restart"
+            continued.messages[0].blocks.last().map(|block| &block.kind),
+            Some(BlockKind::System { message }) if message == "recovery.continued_after_restart"
         ));
 
         let mut discarded = loaded;

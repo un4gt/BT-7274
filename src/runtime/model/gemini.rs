@@ -101,14 +101,14 @@ async fn stream_generate_content(
 fn gemini_contents(history: &[Message]) -> Vec<Value> {
     history
         .iter()
-        .filter(|message| message.role == Role::User || !message.content.is_empty())
+        .filter(|message| message.role == Role::User || !message.content().is_empty())
         .map(|message| {
             serde_json::json!({
                 "role": match message.role {
                     Role::User => "user",
                     Role::Assistant => "model",
                 },
-                "parts": [{"text": message.content}],
+                "parts": [{"text": message.content()}],
             })
         })
         .collect()
@@ -318,7 +318,17 @@ impl GeminiStreamState {
                         let id = provider_id
                             .clone()
                             .unwrap_or_else(|| format!("gemini_call_{}", self.tool_calls.len()));
+                        let index = self.tool_calls.len();
+                        emit(ModelStreamEvent::ToolCallDelta {
+                            round: 0,
+                            index,
+                            call_id: id.clone(),
+                            name: name.to_owned(),
+                            arguments: arguments.to_string(),
+                            replace: true,
+                        });
                         self.tool_calls.push(ToolCall {
+                            index,
                             id,
                             provider_id,
                             name: name.to_owned(),
@@ -659,7 +669,18 @@ mod tests {
             &emitted[0],
             ModelStreamEvent::ReasoningDelta { text } if text == "plan"
         ));
-        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted.len(), 2);
+        assert!(matches!(
+            &emitted[1],
+            ModelStreamEvent::ToolCallDelta {
+                round: 0,
+                index: 0,
+                call_id,
+                name,
+                arguments,
+                replace: true,
+            } if call_id == "call-1" && name == "search" && arguments == r#"{"q":"rust"}"#
+        ));
         let completion = state.finish().unwrap();
         assert_eq!(completion.stop_reason, StopReason::Stop);
         assert_eq!(completion.tool_calls.len(), 1);
@@ -720,6 +741,7 @@ mod tests {
             &mut contents,
             &[ToolRound {
                 calls: vec![ToolCall {
+                    index: 0,
                     id: "call-1".to_owned(),
                     provider_id: Some("call-1".to_owned()),
                     name: "mcp_exa__search".to_owned(),
@@ -747,6 +769,7 @@ mod tests {
             &mut no_id_contents,
             &[ToolRound {
                 calls: vec![ToolCall {
+                    index: 0,
                     id: "internal-1".to_owned(),
                     provider_id: None,
                     name: "mcp_exa__search".to_owned(),

@@ -57,6 +57,7 @@ src/
 - `AssistantTextDelta`
 - `ReasoningDelta`
 - `System`
+- `ToolCallDelta` / `ToolCallReady`
 - `ToolCall`
 - `ToolResult`
 - `Completed`
@@ -81,13 +82,21 @@ system instructions。Chat Completions、Responses 和 Gemini 在当前生成链
 
 ## 会话与上下文
 
-`Message` 保存：
+`Message` 使用稳定消息 ID 和按出现顺序排列的 `MessageBlock` 保存：
 
-- `role` 与正文。
-- reasoning、系统事件、MCP 调用和结果片段。
+- `role` 与 `Text` 正文块；协议请求、标题和正文复制均读取这些块的正文投影。
+- `Reasoning`、`System` 和 `Tool` 块；一次工具调用的参数、结果及终态保存在同一个块中。
 - 实际 Provider/Model 与请求参数快照。
 - completed/streaming/cancelled/failed 状态。
 - 脱敏后的失败分类摘要。
+
+聊天容器由 `ui/transcript.rs` 排列 Markdown 正文和连续过程的一行摘要，完整思考和工具
+内容通过 `ui/activity.rs` 的独立弹窗显示，分别由 `think_view`、`tool_view` 渲染。
+`markdown_view` 按块版本、宽度及主题缓存布局。主聊天上翻后按消息/块位置锚定，详情窗
+独立维护步骤选择和滚动，后台增量不会抢走阅读位置。
+
+旧 `content + parts` 文件在读取时转换为有序块，正常保存时写入新格式；旧记录缺失正文与
+过程的交错位置会在详情中提示。迁移覆盖活动消息和压缩归档，保留所有正文、参数及结果。
 
 上下文预算只包含 System、Conversation 和 Reserved Output。模型窗口已知时，请求前阻止
 确定溢出；MCP 工具定义计入 System，当前工具轮次计入 Conversation。没有统一 tokenizer
@@ -128,7 +137,18 @@ Resources/Prompts 仍只展示能力标记。详细配置见 [mcp.md](mcp.md)。
 ## 终端生命周期
 
 主循环仅在生成、模型同步、MCP 状态过渡或可见动画期间启用 tick，空闲时等待真实事件。
+
+`ui/sparkle.rs` 维护输入框星空的等待、显示、淡出和结束状态。显示阶段持续闪烁，与草稿共存；
+按键和粘贴不改变动画状态，关闭 `whimsy` 时才淡出并结束。它仅为可见帧提供下一次重绘
+截止时间，失焦或弹窗期间保留时间轴但不调度动画帧；主循环独立等待截止时间，不改变加载
+指示器的 100ms tick。后台每秒读取配置
+检查 `whimsy`，仅有效值变化时推送事件；其余字段继续使用启动或设置界面保存时的配置。
 正常退出和错误退出都恢复 raw mode、alternate screen、光标和 panic hook。
+
+星点的坐标哈希、字符选择、亮度曲线和 150ms 帧间隔参考
+[Codex rust-v0.154.0](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/tui/src/bottom_pane/chat_composer/sparkle.rs)。
+该标签允许输入文字时持续显示星空；[#44879](https://github.com/openai/codex/pull/44879) 引入的
+输入即淡出和 15 秒后结束属于另一套行为，本应用采用该标签的持续显示方式，并保留运行时开关的淡入淡出。
 
 ## 安全边界
 

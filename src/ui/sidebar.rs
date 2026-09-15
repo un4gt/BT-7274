@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::app::{App, Focus};
 use crate::text::truncate_width;
+use crate::ui::mouse::MouseTarget;
 use crate::ui::theme::Palette;
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer, palette: Palette) {
@@ -78,10 +79,25 @@ fn render_session_list(app: &App, area: Rect, buf: &mut Buffer, palette: Palette
         .highlight_style(palette.selected())
         .highlight_symbol("❯ ");
     StatefulWidget::render(list, inner, buf, &mut state);
+    let mut mouse = app.mouse.borrow_mut();
+    mouse.register(area, MouseTarget::Sessions);
+    for (row, session) in app
+        .sessions
+        .iter()
+        .skip(state.offset())
+        .take(visible)
+        .enumerate()
+    {
+        mouse.register(
+            Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+            MouseTarget::Session(session.id.clone()),
+        );
+    }
 }
 
 /// Settings 入口：不参与 ↑/↓ 选择，侧栏焦点下按 `s` 打开。
 fn render_settings_entry(app: &App, area: Rect, buf: &mut Buffer, palette: Palette) {
+    app.mouse.borrow_mut().register(area, MouseTarget::Settings);
     let texts = app.settings.language.texts();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)

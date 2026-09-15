@@ -4,9 +4,11 @@
 use color_eyre::eyre::OptionExt;
 use crossterm::event::Event as CrosstermEvent;
 use futures::{FutureExt, StreamExt};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
+use crate::config::WhimsyWatcher;
 use crate::runtime::mcp::McpRuntimeEvent;
 use crate::runtime::model::{ModelCatalog, ModelStreamEvent};
 
@@ -39,6 +41,8 @@ pub enum Event {
 pub enum AppEvent {
     /// 退出应用。
     Quit,
+    /// 配置文件中 whimsy 的有效值发生变化。
+    WhimsyChanged(bool),
     /// Model Runtime 的统一流事件；`stream` 用于丢弃取消后迟到的事件。
     ModelStream {
         stream: u64,
@@ -87,6 +91,39 @@ impl EventHandler {
     /// 通道发送端克隆，供流式生成等后台任务推送事件。
     pub fn sender(&self) -> mpsc::UnboundedSender<Event> {
         self.sender.clone()
+    }
+
+    /// 低频检查配置；文件读取放在线程池，未变化时不唤醒 TUI 重绘。
+    /// 仅在实际运行主循环时启动，避免测试或离屏渲染读取用户配置。
+    pub fn watch_whimsy(&self, path: PathBuf) {
+        let sender = self.sender();
+        tokio::spawn(async move {
+            let mut watcher = WhimsyWatcher::new(path);
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = sender.closed() => break,
+                    _ = interval.tick() => {}
+                }
+                let Ok((updated, value)) = tokio::task::spawn_blocking(move || {
+                    let value = watcher.poll();
+                    (watcher, value)
+                })
+                .await
+                else {
+                    break;
+                };
+                watcher = updated;
+                if let Some(value) = value
+                    && sender
+                        .send(Event::App(AppEvent::WhimsyChanged(value)))
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        });
     }
 
     /// Receives an event from the sender.
@@ -171,6 +208,10 @@ impl EventTask {
               }
               event = crossterm_event => {
                 match event {
+                    Some(Ok(crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+                        kind: crossterm::event::MouseEventKind::Moved,
+                        ..
+                    }))) => {}
                     Some(Ok(event)) => self.send(Event::Crossterm(event)),
                     Some(Err(err)) => {
                         self.send(Event::Error(format!("terminal event stream failed: {err}")));

@@ -17,6 +17,7 @@ use crate::{
 };
 
 use super::{dim_background, popup_rect, theme};
+use unicode_width::UnicodeWidthStr;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let Some(overlay) = &app.conversation_overlay else {
@@ -63,17 +64,18 @@ fn render_rename(frame: &mut Frame, app: &App, edit: &crate::app::LineEdit, erro
         return;
     }
     let prefix = format!("{label}: ");
-    let available = (inner.width as usize).saturating_sub(prefix.chars().count() + 1);
+    let prefix_width = prefix.width();
+    let available = (inner.width as usize).saturating_sub(prefix_width + 1);
     let (visible, cursor) = visible_slice_with_cursor(&edit.buffer, edit.cursor, available);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(prefix.clone(), palette.surface().fg(palette.primary)),
+            Span::styled(prefix, palette.surface().fg(palette.primary)),
             Span::styled(visible, palette.surface()),
         ])),
         Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
     );
     frame.set_cursor_position(Position::new(
-        inner.x + ((prefix.chars().count() + cursor) as u16).min(inner.width.saturating_sub(1)),
+        inner.x + ((prefix_width + cursor) as u16).min(inner.width.saturating_sub(1)),
         inner.y.saturating_add(1),
     ));
     if let Some(error) = error
@@ -120,19 +122,18 @@ fn render_search(frame: &mut Frame, app: &App, edit: &crate::app::LineEdit, sele
         Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(inner);
     if query_area.width > 0 && query_area.height > 0 {
         let prefix = format!("{label}: ");
-        let available = (query_area.width as usize).saturating_sub(prefix.chars().count() + 1);
+        let prefix_width = prefix.width();
+        let available = (query_area.width as usize).saturating_sub(prefix_width + 1);
         let (visible, cursor) = visible_slice_with_cursor(&edit.buffer, edit.cursor, available);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(prefix.clone(), palette.surface().fg(palette.primary)),
+                Span::styled(prefix, palette.surface().fg(palette.primary)),
                 Span::styled(visible, palette.surface()),
             ])),
             query_area,
         );
         frame.set_cursor_position(Position::new(
-            query_area.x
-                + ((prefix.chars().count() + cursor) as u16)
-                    .min(query_area.width.saturating_sub(1)),
+            query_area.x + ((prefix_width + cursor) as u16).min(query_area.width.saturating_sub(1)),
             query_area.y,
         ));
     }
@@ -237,7 +238,7 @@ fn render_recovery(frame: &mut Frame, app: &App, state: &crate::app::RecoverySta
     let partial = session
         .messages
         .get(state.message_index)
-        .map(|message| message.content.as_str())
+        .map(|message| message.content())
         .unwrap_or_default();
     let mut lines = vec![
         Line::from(Span::styled(explanation, palette.surface())),
@@ -266,7 +267,7 @@ fn render_recovery(frame: &mut Frame, app: &App, state: &crate::app::RecoverySta
             .language
             .empty_assistant_placeholder(crate::session::MessageStatus::Streaming)
     } else {
-        partial
+        &partial
     };
     lines.extend(
         wrap_lines(partial, inner.width as usize)

@@ -4,9 +4,7 @@
 
 /// 会话领域类型。持久化细节暂由旧 `session` 模块实现。
 pub(crate) mod conversation {
-    pub(crate) use crate::session::{
-        IncompleteRecovery, Message, MessagePart, MessageStatus, Role, Session,
-    };
+    pub(crate) use crate::session::{IncompleteRecovery, Message, MessageStatus, Role, Session};
 }
 
 /// 上下文预算、分层统计与可撤销 compaction。

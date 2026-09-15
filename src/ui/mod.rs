@@ -12,6 +12,7 @@
 //! └─────────────────────────────────────┘
 //! ```
 
+pub(crate) mod activity;
 mod art;
 mod chat;
 mod code;
@@ -20,10 +21,16 @@ mod error;
 mod footer;
 mod header;
 pub(crate) mod markdown;
+mod markdown_view;
+pub(crate) mod mouse;
 mod picker;
 mod settings;
 mod sidebar;
+pub(crate) mod sparkle;
 mod theme;
+mod think_view;
+mod tool_view;
+pub(crate) mod transcript;
 
 use ratatui::{
     Frame,
@@ -34,6 +41,9 @@ use ratatui::{
 
 use crate::app::App;
 
+#[cfg(test)]
+pub(crate) use chat::input_is_focused;
+
 /// 所有可见后台活动共用同一组动画帧，避免不同面板的加载反馈漂移。
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -43,6 +53,7 @@ pub(crate) fn spinner_frame(ticks: u64) -> &'static str {
 
 /// 渲染整帧。
 pub fn draw(frame: &mut Frame, app: &App) {
+    app.mouse.borrow_mut().clear();
     let palette = theme::palette(app.settings.theme);
     frame.render_widget(Block::new().style(palette.base()), frame.area());
 
@@ -79,18 +90,27 @@ pub fn draw(frame: &mut Frame, app: &App) {
     footer::render(app, footer_area, frame.buffer_mut(), palette);
 
     if let Some(modal) = &app.modal {
+        app.mouse.borrow_mut().block_background();
         settings::render(frame, modal, app.ticks);
     }
     if app.picker.is_some() {
+        app.mouse.borrow_mut().block_background();
         picker::render(frame, app);
     }
     if app.conversation_overlay.is_some() {
+        app.mouse.borrow_mut().block_background();
         conversation::render(frame, app);
     }
     if app.code_overlay.is_some() {
+        app.mouse.borrow_mut().block_background();
         code::render(frame, app);
     }
+    if app.activity_overlay.is_some() {
+        app.mouse.borrow_mut().block_background();
+        activity::render(frame, app);
+    }
     if app.error_detail.is_some() {
+        app.mouse.borrow_mut().block_background();
         error::render(frame, app);
     }
 }
@@ -154,6 +174,147 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn assert_input_cursor(app: &App, width: u16, before: &str, under: &str) {
+        let mut terminal = Terminal::new(TestBackend::new(width, 34)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let backend = terminal.backend();
+        assert!(backend.cursor_visible());
+        let cursor = backend.cursor_position();
+        // 从实际渲染的单元格检查插入点，不重复组件的标签宽度计算。
+        assert!(before.is_ascii());
+        let start = cursor.x.checked_sub(before.len() as u16).unwrap();
+        let rendered_before = (start..cursor.x)
+            .map(|x| backend.buffer()[(x, cursor.y)].symbol())
+            .collect::<String>();
+        assert_eq!(
+            rendered_before, before,
+            "cursor at {cursor:?}, width {width}"
+        );
+        assert_eq!(backend.buffer()[cursor].symbol(), under);
+    }
+
+    #[tokio::test]
+    async fn proxy_input_cursor_tracks_typing_navigation_and_horizontal_scroll() {
+        for language in [crate::i18n::Lang::Zh, crate::i18n::Lang::En] {
+            let settings = Settings {
+                language,
+                ..Settings::default()
+            };
+            let mut app = App::new(settings, vec![Session::new()]);
+            app.focus = Focus::Sidebar;
+            app.handle_key_events(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+                .unwrap();
+            let modal = app.modal.as_mut().unwrap();
+            modal.category = SettingsCategory::Network;
+            modal.pane = SettingsPane::Content;
+            modal.network_pos = 1;
+            app.handle_key_events(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            for character in "http://127".chars() {
+                app.handle_key_events(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                    .unwrap();
+            }
+            for width in [60, 110] {
+                assert_input_cursor(&app, width, "http://127", " ");
+            }
+            app.handle_key_events(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+                .unwrap();
+            assert_input_cursor(&app, 110, "http://12", "7");
+            app.handle_key_events(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+                .unwrap();
+            assert_input_cursor(&app, 110, "", "h");
+            app.handle_key_events(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+                .unwrap();
+            assert_input_cursor(&app, 110, "http://127", " ");
+            for text in [
+                "你好http://127".to_owned(),
+                format!("{}http://127", "x".repeat(160)),
+            ] {
+                app.modal.as_mut().unwrap().proxy_edit = LineEdit::from_text(&text);
+                for width in [60, 110] {
+                    assert_input_cursor(&app, width, "http://127", " ");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn localized_single_line_editors_place_the_cursor_after_the_text() {
+        for language in [crate::i18n::Lang::Zh, crate::i18n::Lang::En] {
+            let settings = Settings {
+                language,
+                ..Settings::default()
+            };
+            let mut app = App::new(settings, vec![Session::new()]);
+            let value = "http://127";
+            app.handle_key_events(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))
+                .unwrap();
+            let picker = app.picker.as_mut().unwrap();
+            picker.editing = true;
+            picker.buffer = value.chars().collect();
+            picker.cursor = picker.buffer.len();
+            assert_input_cursor(&app, 80, value, " ");
+
+            app.picker = None;
+            app.conversation_overlay = Some(ConversationOverlay::Rename {
+                session_id: app.open_session().id.clone(),
+                edit: LineEdit::from_text(value),
+                error: None,
+            });
+            assert_input_cursor(&app, 80, value, " ");
+            app.conversation_overlay = Some(ConversationOverlay::Search {
+                edit: LineEdit::from_text(value),
+                selected: 0,
+            });
+            assert_input_cursor(&app, 80, value, " ");
+
+            app.conversation_overlay = None;
+            app.focus = Focus::Sidebar;
+            app.handle_key_events(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+                .unwrap();
+            app.handle_key_events(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+                .unwrap();
+            app.handle_key_events(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+                .unwrap();
+            let wizard = app.modal.as_mut().unwrap().wizard.as_mut().unwrap();
+            wizard.step = 2;
+            wizard.field = 0;
+            wizard.name = LineEdit::from_text(value);
+            assert_input_cursor(&app, 80, value, " ");
+
+            let wizard = app.modal.as_mut().unwrap().wizard.as_mut().unwrap();
+            wizard.step = 3;
+            wizard.manual_active = true;
+            wizard.manual = LineEdit::from_text(value);
+            assert_input_cursor(&app, 80, value, " ");
+
+            let modal = app.modal.as_mut().unwrap();
+            modal.wizard = None;
+            modal.manual_active = true;
+            modal.manual = LineEdit::from_text(value);
+            assert_input_cursor(&app, 110, value, " ");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_input_cursor_has_room_after_a_scrolled_value() {
+        let mut app = App::new(Settings::default(), vec![Session::new()]);
+        app.focus = Focus::Sidebar;
+        app.handle_key_events(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        let modal = app.modal.as_mut().unwrap();
+        modal.category = SettingsCategory::Mcp;
+        modal.pane = SettingsPane::Content;
+        app.handle_key_events(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
+        let wizard = app.modal.as_mut().unwrap().mcp_wizard.as_mut().unwrap();
+        wizard.field = 0;
+        wizard.name = LineEdit::from_text(&format!("{}http://127", "x".repeat(160)));
+        for width in [60, 110] {
+            assert_input_cursor(&app, width, "http://127", " ");
+        }
     }
 
     #[tokio::test]
@@ -392,8 +553,7 @@ mod tests {
         let mut session = Session::new();
         let mut message = Message::assistant_streaming(settings.default_selection());
         message.status = MessageStatus::Completed;
-        message.content =
-            "```rust\nlet very_long_identifier = \"你好世界 and more text\";\n```".to_owned();
+        message.append_text("```rust\nlet very_long_identifier = \"你好世界 and more text\";\n```");
         session.messages.push(message);
         let mut app = App::new(settings, vec![session]);
         app.editor.set_text("draft");
@@ -591,7 +751,7 @@ url = "http://proxy-user:secret-password@127.0.0.1:7890"
 
         let selection = app.settings.default_selection();
         let mut partial = Message::assistant_streaming(selection);
-        partial.content = "persisted partial reply".to_owned();
+        partial.append_text("persisted partial reply");
         app.sessions[0].messages.push(partial);
         app.conversation_overlay = Some(ConversationOverlay::Recovery(RecoveryState {
             session_id: app.open_session().id.clone(),
@@ -612,7 +772,7 @@ url = "http://proxy-user:secret-password@127.0.0.1:7890"
                     .push(Message::user(format!("task {index}"), None));
             } else {
                 let mut assistant = Message::assistant_streaming(app.settings.default_selection());
-                assistant.content = format!("answer {index}");
+                assistant.append_text(&(format!("answer {index}")));
                 assistant.status = MessageStatus::Completed;
                 app.sessions[0].messages.push(assistant);
             }
