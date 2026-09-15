@@ -15,3 +15,7 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 hosting = "github"
 # PR 上也跑 dist plan，尽早发现发布配置问题
 pr-run-mode = "plan"
+
+# 显式使用仍受支持的 Apple Silicon 构建机，避免默认 macos-14 下线影响发布。
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
