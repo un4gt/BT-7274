@@ -21,7 +21,6 @@ pub(crate) struct Palette {
     pub user: Color,
     pub assistant: Color,
     pub art_body: Color,
-    pub art_panel: Color,
 }
 
 impl Palette {
@@ -68,8 +67,7 @@ pub(crate) fn palette(theme: Theme) -> Palette {
             selection: Color::Rgb(22, 50, 52),
             user: Color::Rgb(163, 230, 53),
             assistant: Color::Rgb(94, 234, 212),
-            art_body: Color::Rgb(57, 82, 82),
-            art_panel: Color::Rgb(35, 57, 59),
+            art_body: Color::Rgb(103, 137, 133),
         },
         Theme::Carbon => Palette {
             background: Color::Rgb(15, 17, 20),
@@ -86,8 +84,7 @@ pub(crate) fn palette(theme: Theme) -> Palette {
             selection: Color::Rgb(38, 53, 72),
             user: Color::Rgb(74, 222, 128),
             assistant: Color::Rgb(147, 197, 253),
-            art_body: Color::Rgb(66, 72, 82),
-            art_panel: Color::Rgb(42, 47, 55),
+            art_body: Color::Rgb(123, 132, 148),
         },
         Theme::Paper => Palette {
             background: Color::Rgb(243, 247, 246),
@@ -104,8 +101,7 @@ pub(crate) fn palette(theme: Theme) -> Palette {
             selection: Color::Rgb(235, 248, 246),
             user: Color::Rgb(21, 128, 61),
             assistant: Color::Rgb(13, 116, 108),
-            art_body: Color::Rgb(171, 190, 186),
-            art_panel: Color::Rgb(205, 219, 216),
+            art_body: Color::Rgb(102, 125, 119),
         },
     }
 }

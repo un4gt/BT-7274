@@ -13,7 +13,6 @@
 //! ```
 
 pub(crate) mod activity;
-mod art;
 mod chat;
 mod code;
 mod conversation;
@@ -24,6 +23,8 @@ pub(crate) mod markdown;
 mod markdown_view;
 pub(crate) mod mouse;
 mod picker;
+#[cfg(test)]
+mod preview;
 mod settings;
 mod sidebar;
 pub(crate) mod sparkle;
@@ -88,6 +89,31 @@ pub fn draw(frame: &mut Frame, app: &App) {
     sidebar::render(app, sidebar_area, frame.buffer_mut(), palette);
     chat::render(frame, app, content_area, palette);
     footer::render(app, footer_area, frame.buffer_mut(), palette);
+
+    if let Some(startup) = &app.startup {
+        let [messages_area, input_area] = chat::areas(content_area);
+        titan::render_startup(
+            frame.buffer_mut(),
+            startup.elapsed_ms(),
+            &[
+                header_area,
+                sidebar_area,
+                messages_area,
+                input_area,
+                footer_area,
+            ],
+            titan::Handoff {
+                area: transcript::content_area(messages_area),
+                idle: app.show_idle_titan().then_some(titan::Idle::new(
+                    palette.surface,
+                    palette.art_body,
+                    palette.accent,
+                )),
+            },
+        );
+        app.mouse.borrow_mut().clear();
+        return;
+    }
 
     if let Some(modal) = &app.modal {
         app.mouse.borrow_mut().block_background();
@@ -193,6 +219,91 @@ mod tests {
             "cursor at {cursor:?}, width {width}"
         );
         assert_eq!(backend.buffer()[cursor].symbol(), under);
+    }
+
+    #[tokio::test]
+    async fn idle_titan_disappears_for_drafts_and_history_and_obeys_its_setting() {
+        let mut app = App::new(Settings::default(), vec![Session::new()]);
+        assert!(render_text(&app, 120, 42).contains('◉'));
+        for draft in ["hello", " ", "\n", "你好"] {
+            app.editor.set_text(draft);
+            assert!(!render_text(&app, 120, 42).contains('◉'));
+        }
+        app.editor.clear();
+        assert!(render_text(&app, 120, 42).contains('◉'));
+        app.settings.show_titan_when_idle = false;
+        assert!(!render_text(&app, 120, 42).contains('◉'));
+        app.settings.show_titan_when_idle = true;
+        app.sessions[0]
+            .messages
+            .push(Message::user("history".into(), None));
+        assert!(!render_text(&app, 120, 42).contains('◉'));
+    }
+
+    #[tokio::test]
+    async fn startup_handles_resize_and_hands_off_the_exact_chat_frame_without_a_cursor() {
+        use std::time::{Duration, Instant};
+        for theme in Theme::ALL {
+            let mut app = App::new(
+                Settings {
+                    theme,
+                    ..Settings::default()
+                },
+                vec![Session::new()],
+            );
+            let now = Instant::now();
+            for (width, height) in [(1, 1), (30, 8), (80, 24), (120, 42)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                app.startup = Some(crate::startup::Startup::for_test(now, true));
+                for ms in [
+                    0,
+                    400,
+                    900,
+                    1_350,
+                    1_550,
+                    2_300,
+                    3_000,
+                    3_500,
+                    3_900,
+                    4_799,
+                    titan::STARTUP_DURATION_MS,
+                ] {
+                    app.startup
+                        .as_mut()
+                        .unwrap()
+                        .advance(now + Duration::from_millis(ms));
+                    terminal.draw(|frame| draw(frame, &app)).unwrap();
+                    assert!(!terminal.backend().cursor_visible());
+                }
+                let final_intro = terminal.backend().buffer().clone();
+                // 在过渡合成仍生效的最后一帧也必须已经停稳，不能靠移除过渡层换画面。
+                app.startup = Some(crate::startup::Startup::for_test(now, true));
+                app.startup
+                    .as_mut()
+                    .unwrap()
+                    .advance(now + Duration::from_millis(4_799));
+                terminal.draw(|frame| draw(frame, &app)).unwrap();
+                for (before, after) in terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .zip(&final_intro.content)
+                {
+                    assert_eq!(before.symbol(), after.symbol());
+                    assert_eq!(before.bg, after.bg);
+                    if before.symbol() != " " {
+                        assert_eq!(before.fg, after.fg);
+                    }
+                }
+                app.startup = None;
+                terminal.draw(|frame| draw(frame, &app)).unwrap();
+                assert_eq!(&final_intro, terminal.backend().buffer());
+                if width >= 80 {
+                    assert!(terminal.backend().cursor_visible());
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -475,7 +586,8 @@ mod tests {
 
         assert_eq!(row_of("Context") - row_of("Models"), 2);
         assert_eq!(row_of("Theme") - row_of("Language"), 3);
-        assert_eq!(row_of("Titan Art") - row_of("Theme"), 3);
+        assert_eq!(row_of("Startup Intro") - row_of("Theme"), 3);
+        assert_eq!(row_of("Idle Titan") - row_of("Startup Intro"), 3);
 
         let appearance_row = rows
             .iter()

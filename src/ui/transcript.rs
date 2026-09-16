@@ -1,6 +1,6 @@
 //! Transcript layout: ordered answers, compact process groups, and anchored history reading.
 use super::{
-    activity::BlockRef, art, markdown_view::MarkdownView, mouse::MouseTarget, spinner_frame,
+    activity::BlockRef, markdown_view::MarkdownView, mouse::MouseTarget, spinner_frame,
     theme::Palette, tool_view,
 };
 use crate::{
@@ -79,6 +79,14 @@ pub(super) struct MessageWindow {
     pub rendered_messages: usize,
 }
 
+pub(super) fn content_area(area: Rect) -> Rect {
+    let inner = Block::bordered().inner(area);
+    Rect {
+        width: inner.width.saturating_sub(u16::from(inner.width >= 4)),
+        ..inner
+    }
+}
+
 pub(super) fn render_messages(app: &App, area: Rect, buf: &mut Buffer, palette: Palette) {
     let hint = match app.settings.language {
         Lang::Zh => "点击过程 / F3 详情 · 滚轮 / PgUp/PgDn 历史",
@@ -93,14 +101,8 @@ pub(super) fn render_messages(app: &App, area: Rect, buf: &mut Buffer, palette: 
         );
     let inner = block.inner(area);
     block.render(area, buf);
-    if app.settings.show_titan {
-        art::render_fill(inner, buf, palette);
-    }
     let show_scrollbar = inner.width >= 4;
-    let content = Rect {
-        width: inner.width.saturating_sub(u16::from(show_scrollbar)),
-        ..inner
-    };
+    let content = content_area(area);
     let window = build_message_window(
         app,
         content.width as usize,
@@ -121,6 +123,9 @@ pub(super) fn render_messages(app: &App, area: Rect, buf: &mut Buffer, palette: 
     Paragraph::new(window.lines)
         .style(palette.surface())
         .render(content, buf);
+    if app.startup.is_none() && app.show_idle_titan() {
+        titan::Idle::new(palette.surface, palette.art_body, palette.accent).render(content, buf);
+    }
     if show_scrollbar && let Some(metrics) = window.scrollbar {
         StatefulWidget::render(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)

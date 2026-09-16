@@ -1294,17 +1294,16 @@ pub struct Settings {
     /// 聊天编辑器可配置命令键。
     #[serde(default, skip_serializing_if = "is_default")]
     pub keybindings: KeyBindings,
-    /// 是否在聊天区显示 BT-7274 像素画背景（默认关闭，后续再默认开启）。
-    #[serde(default = "default_false")]
-    pub show_titan: bool,
+    /// 首次完整播放之后，是否仍在每次启动时播放 BT 动画。
+    #[serde(default, alias = "show_titan_on_starup")]
+    pub show_titan_on_startup: bool,
+    /// 无历史消息、草稿或活动任务的新对话中显示 BT。
+    #[serde(default = "default_true", alias = "show_titan")]
+    pub show_titan_when_idle: bool,
 }
 
 fn default_model() -> String {
     "gpt-4o-mini".to_owned()
-}
-
-fn default_false() -> bool {
-    false
 }
 
 fn is_default<T>(value: &T) -> bool
@@ -1331,7 +1330,8 @@ impl Default for Settings {
             context: ContextSettings::default(),
             mcp_servers: Vec::new(),
             keybindings: KeyBindings::default(),
-            show_titan: default_false(),
+            show_titan_on_startup: false,
+            show_titan_when_idle: true,
         }
     }
 }
@@ -1713,8 +1713,29 @@ mod tests {
         assert_eq!(settings.theme, Theme::Vanguard);
         assert_eq!(settings.proxy, ProxySettings::default());
         assert!(settings.mcp_servers.is_empty());
-        assert!(!settings.show_titan);
+        assert!(!settings.show_titan_on_startup);
+        assert!(settings.show_titan_when_idle);
         assert!(!settings.whimsy);
+    }
+
+    #[test]
+    fn titan_preferences_preserve_legacy_values_and_round_trip_independently() {
+        let raw = format!(
+            "config_version = {CURRENT_CONFIG_VERSION}\nshow_titan = false\nshow_titan_on_starup = true\n"
+        );
+        let settings = Settings::from_toml(&raw).unwrap();
+        assert!(settings.show_titan_on_startup);
+        assert!(!settings.show_titan_when_idle);
+        let serialized = toml::to_string(&settings).unwrap();
+        assert!(serialized.contains("show_titan_on_startup = true"));
+        assert!(serialized.contains("show_titan_when_idle = false"));
+        assert!(!serialized.contains("show_titan ="));
+        let restored = Settings::from_toml(&serialized).unwrap();
+        assert_eq!(restored, settings);
+        let defaults =
+            Settings::from_toml(&format!("config_version = {CURRENT_CONFIG_VERSION}\n")).unwrap();
+        assert!(!defaults.show_titan_on_startup);
+        assert!(defaults.show_titan_when_idle);
     }
 
     #[test]

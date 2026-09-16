@@ -142,12 +142,19 @@ pub enum ConversationOverlay {
 pub enum SettingsField {
     Language,
     Theme,
-    TitanArt,
+    TitanStartup,
+    TitanIdle,
     Whimsy,
 }
 
 impl SettingsField {
-    pub const ALL: [Self; 4] = [Self::Language, Self::Theme, Self::TitanArt, Self::Whimsy];
+    pub const ALL: [Self; 5] = [
+        Self::Language,
+        Self::Theme,
+        Self::TitanStartup,
+        Self::TitanIdle,
+        Self::Whimsy,
+    ];
 
     fn from_index(index: usize) -> Self {
         Self::ALL[index % Self::ALL.len()]
@@ -870,6 +877,7 @@ pub struct App {
     pub editor: ChatEditor,
     /// 输入框星空的显示状态和下一帧截止时间。
     pub(crate) sparkle: Sparkle,
+    pub(crate) startup: Option<crate::startup::Startup>,
     pub(crate) chat_view: RefCell<ChatViewState>,
     pub(crate) activity_overlay: Option<ActivityOverlay>,
     pub(crate) mouse: RefCell<MouseMap>,
@@ -922,6 +930,7 @@ impl App {
             running: true,
             events,
             sparkle: Sparkle::new(settings.whimsy),
+            startup: None,
             settings,
             modal: None,
             picker: None,
@@ -1051,13 +1060,33 @@ impl App {
 
     async fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> color_eyre::Result<()> {
         self.events.watch_whimsy(Settings::config_path()?);
+        self.startup =
+            crate::startup::Startup::load(self.settings.show_titan_on_startup, Instant::now())?;
         while self.running {
+            if let Some(startup) = &mut self.startup {
+                startup.advance(Instant::now());
+            }
             self.sparkle
                 .set_enabled(self.settings.whimsy, Instant::now());
             crate::terminal::draw(terminal, |frame| ui::draw(frame, self))?;
+            if self
+                .startup
+                .as_ref()
+                .is_some_and(|startup| startup.finished())
+            {
+                if let Some(startup) = self.startup.take()
+                    && startup.record_completion().is_err()
+                {
+                    tracing::warn!("开场已完成，但首次播放记录保存失败");
+                }
+                continue;
+            }
             self.events
                 .set_animation_enabled(self.periodic_tick_required());
-            let next_frame = self.sparkle.next_frame();
+            let next_frame = self
+                .startup
+                .as_ref()
+                .map_or_else(|| self.sparkle.next_frame(), |startup| startup.next_frame());
             let event = tokio::select! {
                 event = self.events.next() => event?,
                 _ = async {
@@ -1070,6 +1099,9 @@ impl App {
             };
             match event {
                 Event::Tick => self.tick(),
+                Event::Crossterm(event) if self.startup.is_some() => {
+                    self.handle_startup_event(event)
+                }
                 Event::Crossterm(event) => match event {
                     crossterm::event::Event::Key(key_event)
                         if key_event.kind == crossterm::event::KeyEventKind::Press =>
@@ -1093,6 +1125,37 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn handle_startup_event(&mut self, event: crossterm::event::Event) {
+        let Some(startup) = &mut self.startup else {
+            return;
+        };
+        match event {
+            crossterm::event::Event::FocusLost => startup.set_focus(false, Instant::now()),
+            crossterm::event::Event::FocusGained => startup.set_focus(true, Instant::now()),
+            crossterm::event::Event::Key(key)
+                if key.kind == crossterm::event::KeyEventKind::Press =>
+            {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.running = false;
+                } else if key.code == KeyCode::Esc && startup.can_skip() {
+                    self.startup = None;
+                }
+            }
+            // 启动期间消费输入，避免按键、粘贴或点击穿透到聊天界面。
+            _ => {}
+        }
+    }
+
+    pub(crate) fn show_idle_titan(&self) -> bool {
+        self.settings.show_titan_when_idle
+            && self.open_session().messages.is_empty()
+            && self.open_session().compactions.is_empty()
+            && self.open_session().summary.is_none()
+            && self.editor.text().is_empty()
+            && !self.generating()
+            && self.notice().is_none()
     }
 
     fn periodic_tick_required(&self) -> bool {
@@ -3436,7 +3499,12 @@ impl App {
             KeyCode::Enter => match SettingsField::from_index(modal.appearance_pos) {
                 SettingsField::Language => modal.draft.language = modal.draft.language.toggle(),
                 SettingsField::Theme => modal.draft.theme = modal.draft.theme.next(),
-                SettingsField::TitanArt => modal.draft.show_titan = !modal.draft.show_titan,
+                SettingsField::TitanStartup => {
+                    modal.draft.show_titan_on_startup = !modal.draft.show_titan_on_startup
+                }
+                SettingsField::TitanIdle => {
+                    modal.draft.show_titan_when_idle = !modal.draft.show_titan_when_idle
+                }
                 SettingsField::Whimsy => modal.draft.whimsy = !modal.draft.whimsy,
             },
             _ => {}
@@ -4187,6 +4255,56 @@ mod tests {
         app.settings.keybindings.newline = "alt+enter".parse().unwrap();
         app.handle_input_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
         assert_eq!(app.editor.text(), "hello \n");
+    }
+
+    #[tokio::test]
+    async fn startup_consumes_input_and_only_repeat_playback_can_be_skipped() {
+        use crossterm::event::Event as TerminalEvent;
+        let mut app = App::new(Settings::default(), vec![Session::new()]);
+        let now = Instant::now();
+        app.startup = Some(crate::startup::Startup::for_test(now, true));
+        for event in [
+            TerminalEvent::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            TerminalEvent::Paste("must not become a prompt".into()),
+            TerminalEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            TerminalEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        ] {
+            app.handle_startup_event(event);
+        }
+        assert!(app.startup.is_some());
+        assert!(app.editor.is_empty());
+        assert!(app.open_session().messages.is_empty());
+        app.startup = Some(crate::startup::Startup::for_test(now, false));
+        app.handle_startup_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.startup.is_none());
+        app.startup = Some(crate::startup::Startup::for_test(now, true));
+        app.handle_startup_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(!app.running);
+        assert!(!app.startup.unwrap().finished());
+    }
+
+    #[tokio::test]
+    async fn titan_settings_toggle_independently_in_appearance() {
+        let mut app = App::new(Settings::default(), vec![Session::new()]);
+        app.modal = Some(SettingsUi::new(app.settings.clone()));
+        for field in [SettingsField::TitanStartup, SettingsField::TitanIdle] {
+            app.modal.as_mut().unwrap().appearance_pos = SettingsField::ALL
+                .iter()
+                .position(|candidate| *candidate == field)
+                .unwrap();
+            app.handle_appearance_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        let draft = &app.modal.as_ref().unwrap().draft;
+        assert!(draft.show_titan_on_startup);
+        assert!(!draft.show_titan_when_idle);
+        assert!(!app.settings.show_titan_on_startup);
+        assert!(app.settings.show_titan_when_idle);
     }
 
     #[tokio::test]

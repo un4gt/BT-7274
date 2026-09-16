@@ -60,7 +60,8 @@ current_provider = 0
 model = "gemini-2.5-flash"
 language = "zh"
 theme = "vanguard"
-show_titan = false
+show_titan_on_startup = false
+show_titan_when_idle = true
 whimsy = false
 
 [[providers]]
@@ -76,6 +77,11 @@ mode = "disabled"
 
 官方 Base URL 可以省略。BT-7274 会自动添加
 `x-goog-api-client: bt-7274/0.1.0`，并对 Gemini 当前及未来新增的 `finishReason` 做向前兼容。
+
+首次启动完整播放 BT 降落、震屏与聊天面板展开动画（约 4.9 秒）。落稳后机体沿平滑曲线
+移动、缩放至聊天区域，面板同步滑入，最后停靠在空对话中。
+`show_titan_on_startup` 控制之后每次启动是否重播；`show_titan_when_idle` 控制无历史、无草稿
+的新对话中是否显示 BT。也可在“设置 → 外观”分别切换。
 
 在配置文件顶层设置 `whimsy = true` 可开启输入框星空，改为 `false` 关闭，运行中约 1 秒内
 生效。也可在“设置 → 外观 → 输入框星空”切换，按 `Ctrl+S` 保存。开启时淡入 1 秒，随后

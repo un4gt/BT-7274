@@ -18,16 +18,19 @@ use ratatui::{
 };
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
+    let [messages_area, input_area] = areas(area);
+    render_messages(app, messages_area, frame.buffer_mut(), palette);
+    render_input(frame, app, input_area, palette);
+}
+
+pub(super) fn areas(area: Rect) -> [Rect; 2] {
     let input_height = match area.height {
         14.. => 7,
         8..=13 => 5,
         _ => 3,
     }
     .min(area.height);
-    let [messages_area, input_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(input_height)]).areas(area);
-    render_messages(app, messages_area, frame.buffer_mut(), palette);
-    render_input(frame, app, input_area, palette);
+    Layout::vertical([Constraint::Fill(1), Constraint::Length(input_height)]).areas(area)
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
@@ -86,12 +89,12 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
     app.sparkle.render(
         inner,
         &viewport,
-        focused,
+        focused && app.startup.is_none(),
         frame.buffer_mut(),
         palette,
         std::time::Instant::now(),
     );
-    if focused && inner.width > 0 && inner.height > 0 {
+    if focused && app.startup.is_none() && inner.width > 0 && inner.height > 0 {
         frame.set_cursor_position(Position::new(
             inner.x + (viewport.cursor_column as u16).min(inner.width - 1),
             inner.y + (viewport.cursor_row as u16).min(inner.height - 1),

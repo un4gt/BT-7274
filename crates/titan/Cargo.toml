@@ -1,0 +1,10 @@
+[package]
+name = "titan"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "BT-7274 terminal animation and idle artwork"
+publish = false
+
+[dependencies]
+ratatui = { version = "0.30.2", default-features = false }

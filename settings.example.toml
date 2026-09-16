@@ -6,7 +6,8 @@ current_provider = 0
 model = "gemini-2.5-flash"
 language = "zh"      # zh / en
 theme = "vanguard"  # vanguard / carbon / paper
-show_titan = false
+show_titan_on_startup = false
+show_titan_when_idle = true
 whimsy = false     # 输入框星空；运行中改为 true/false，约 1 秒内生效
 
 [[providers]]

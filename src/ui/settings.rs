@@ -1180,7 +1180,12 @@ fn render_appearance(
     let values = [
         modal.draft.language.label(),
         modal.draft.theme.label(),
-        if modal.draft.show_titan {
+        if modal.draft.show_titan_on_startup {
+            texts.value_on
+        } else {
+            texts.value_off
+        },
+        if modal.draft.show_titan_when_idle {
             texts.value_on
         } else {
             texts.value_off
@@ -1194,7 +1199,12 @@ fn render_appearance(
     let value_colors = [
         palette.primary,
         palette.accent,
-        if modal.draft.show_titan {
+        if modal.draft.show_titan_on_startup {
+            palette.success
+        } else {
+            palette.muted
+        },
+        if modal.draft.show_titan_when_idle {
             palette.success
         } else {
             palette.muted

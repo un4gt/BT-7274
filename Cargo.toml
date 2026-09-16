@@ -8,7 +8,13 @@ edition = "2024"
 repository = "https://github.com/un4gt/BT-7274"
 readme = "README.md"
 
+[workspace]
+members = ["crates/titan"]
+default-members = [".", "crates/titan"]
+resolver = "3"
+
 [dependencies]
+titan = { path = "crates/titan" }
 crossterm = { version = "0.29.0", default-features = false, features = ["bracketed-paste", "event-stream", "windows"] }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }

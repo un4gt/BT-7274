@@ -12,6 +12,7 @@ mod logging;
 mod runtime;
 mod secret;
 mod session;
+mod startup;
 mod storage;
 mod terminal;
 mod text;

@@ -12,7 +12,8 @@ current_provider = 0
 model = "gemini-2.5-flash"
 language = "zh"
 theme = "vanguard"
-show_titan = false
+show_titan_on_startup = false
+show_titan_when_idle = true
 
 [[providers]]
 id = "provider-gemini"

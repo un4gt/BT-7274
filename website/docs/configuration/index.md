@@ -21,7 +21,8 @@ current_provider = 0
 model = "gemini-2.5-flash"
 language = "zh"
 theme = "vanguard"
-show_titan = false
+show_titan_on_startup = false
+show_titan_when_idle = true
 whimsy = false
 
 [[providers]]
@@ -48,12 +49,27 @@ mode = "disabled"
 | `model` | 当前模型，必须属于当前 Provider 的模型列表 |
 | `language` | `zh` 或 `en` |
 | `theme` | `vanguard`、`carbon` 或 `paper` |
-| `show_titan` | 是否显示聊天区像素画背景 |
+| `show_titan_on_startup` | 首次完整播放后，是否每次启动都播放动画；默认 `false` |
+| `show_titan_when_idle` | 空对话且无草稿或活动任务时显示 BT；默认 `true` |
 | `whimsy` | 输入框星空特效，默认 `false`，支持运行时开关 |
 | `proxy` | 所有 Provider 请求共用的代理 |
 | `context` | 可选的上下文预算与自动压缩设置 |
 | `keybindings` | 可选的聊天编辑器快捷键 |
 | `mcp_servers` | 以 Server 名称为键的远程 Streamable HTTP MCP 表 |
+
+## BT 开场与空对话
+
+首次启动会完整播放约 4.9 秒的降落、震屏、起身、点亮传感器和聊天面板展开动画，
+不受 `show_titan_on_startup` 开关影响。完成后在系统数据目录的 `bt-7274/intro-completed`
+记录一次；更新程序或修改配置不会重新触发首次开场。中途退出不记录完成，失焦时暂停计时。
+后续启动仅在 `show_titan_on_startup = true` 时播放，可按 Esc 跳过；Ctrl+C 始终可退出。
+
+机体上线后连续移动、缩放至聊天区域，采用两端减速的平滑曲线，聊天面板同步滑入。
+关闭空对话机体显示时，机体在移动过程中逐渐淡出。
+
+`show_titan_when_idle` 仅在无聊天历史、无草稿且未生成时显示静态 BT；输入空格或换行
+也会隐藏，清空草稿后恢复。两项均可在“设置 → 外观”切换并保存。旧的 `show_titan`
+作为 idle 开关继续读取，`show_titan_on_starup` 也接受为启动开关的拼写别名；保存时写入正式名称。
 
 ## 输入框星空
 
