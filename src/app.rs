@@ -1054,9 +1054,7 @@ impl App {
         while self.running {
             self.sparkle
                 .set_enabled(self.settings.whimsy, Instant::now());
-            // 动画重绘前隐藏光标，画完后由 Ratatui 恢复位置，避免星点刷新时闪移。
-            terminal.hide_cursor()?;
-            terminal.draw(|frame| ui::draw(frame, self))?;
+            crate::terminal::draw(terminal, |frame| ui::draw(frame, self))?;
             self.events
                 .set_animation_enabled(self.periodic_tick_required());
             let next_frame = self.sparkle.next_frame();

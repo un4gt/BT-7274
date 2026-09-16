@@ -13,6 +13,7 @@ mod runtime;
 mod secret;
 mod session;
 mod storage;
+mod terminal;
 mod text;
 mod ui;
 
