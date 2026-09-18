@@ -9,13 +9,14 @@ use crate::{
     Idle,
     paint::{AMBER, BLACK, mix, rgb},
     portrait::{Portrait, Sample},
-    timeline::progress,
+    timeline::{ONLINE_MS, progress},
 };
 
-const HANDOFF_MS: u64 = 2_750;
-const MOTION_END_MS: u64 = 4_600;
-const SETTLED_MS: u64 = 4_800;
-pub const STARTUP_DURATION_MS: u64 = 4_900;
+const HANDOFF_MS: u64 = ONLINE_MS;
+const ENVIRONMENT_END_MS: u64 = HANDOFF_MS + 360;
+const BACKGROUND_END_MS: u64 = HANDOFF_MS + 650;
+const MOTION_END_MS: u64 = HANDOFF_MS + 850;
+pub const STARTUP_DURATION_MS: u64 = HANDOFF_MS + 900;
 
 /// 宿主提供最终机体区域及样式；过渡期间由本模块绘制同一个机体。
 pub struct Handoff {
@@ -33,13 +34,13 @@ fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
 }
 
-/// 机体持续可见并平滑移入聊天区域，环境淡去，真实 UI 面板按次序滑入。
+/// 机体持续可见并平滑移入聊天区域；面板在最终位置渐显，不按字符格推动边框。
 /// 宿主应先画不含 idle 机体的 UI；完成帧由这里补上同一份 Idle 纹理。
 pub fn render_startup(target: &mut Buffer, ms: u64, panels: &[Rect], handoff: Handoff) {
     if target.area.is_empty() {
         return;
     }
-    if ms >= SETTLED_MS {
+    if ms >= STARTUP_DURATION_MS {
         if let Some(idle) = handoff.idle {
             idle.render(handoff.area, target);
         }
@@ -54,8 +55,8 @@ pub fn render_startup(target: &mut Buffer, ms: u64, panels: &[Rect], handoff: Ha
 
     let ui = target.clone();
     let environment = crate::backdrop(area.width, area.height, ms);
-    let background = ease(ms, HANDOFF_MS, 4_550);
-    let environment_opacity = 1.0 - ease(ms, HANDOFF_MS, 3_850);
+    let background = ease(ms, HANDOFF_MS, BACKGROUND_END_MS);
+    let environment_opacity = 1.0 - ease(ms, HANDOFF_MS, ENVIRONMENT_END_MS);
     for (index, cell) in target.content.iter_mut().enumerate() {
         *cell = environment.content[index].clone();
         let bg = mix(BLACK, ui.content[index].bg, background);
@@ -99,14 +100,14 @@ pub fn render_startup(target: &mut Buffer, ms: u64, panels: &[Rect], handoff: Ha
     );
     let height = lerp(from.height, end_height, t);
     let morph = if to.is_some() {
-        ease(ms, HANDOFF_MS + 250, MOTION_END_MS)
+        ease(ms, HANDOFF_MS + 100, MOTION_END_MS)
     } else {
         0.0
     };
     let opacity = if to.is_some() {
         1.0
     } else {
-        1.0 - ease(ms, HANDOFF_MS + 450, MOTION_END_MS)
+        1.0 - ease(ms, HANDOFF_MS + 150, MOTION_END_MS)
     };
     if opacity <= 0.0 {
         return;
@@ -160,29 +161,15 @@ fn reveal_panels(
             let index = panels
                 .iter()
                 .position(|panel| panel.contains(Position::new(x, y)));
-            let delay = index.unwrap_or(0) as u64 * 35;
-            let movement = 1.0 - ease(ms, HANDOFF_MS + delay, 4_350 + delay);
-            let offset = match index {
-                Some(0) => (0.0, -2.0),
-                Some(1) => (-8.0, 0.0),
-                Some(2) => (0.0, 1.0),
-                Some(3) => (0.0, 4.0),
-                Some(4) => (0.0, 2.0),
-                _ => (0.0, 0.0),
-            };
-            let px = i32::from(x) + (offset.0 * movement).round() as i32;
-            let py = i32::from(y) + (offset.1 * movement).round() as i32;
-            if px < 0 || py < 0 {
-                continue;
-            }
-            let Some(cell) = target.cell_mut((px as u16, py as u16)) else {
-                continue;
-            };
+            // 面板只错开一帧显现。终端只能整格移动长边框，持续位移会造成阶梯与拖尾感。
+            let delay = index.unwrap_or(0).min(4) as u64 * 16;
+            let start = HANDOFF_MS + delay;
+            let cell = &mut target[(x, y)];
             let source = &ui[(x, y)];
             let opacity = if is_border(source.symbol()) {
-                ease(ms, HANDOFF_MS + delay, 3_850 + delay)
+                ease(ms, start, start + 420)
             } else {
-                ease(ms, 2_950 + delay, 4_650 + delay)
+                ease(ms, start + 60, start + 560)
             };
             if opacity == 0.0 {
                 continue;
@@ -314,7 +301,7 @@ mod tests {
             let area = Rect::new(0, 0, width, height);
             let idle = Idle::new(Color::Rgb(12, 24, 27), Color::Rgb(103, 137, 133), AMBER);
             let mut previous: Option<(i32, i32)> = None;
-            for ms in (HANDOFF_MS..=SETTLED_MS).step_by(16) {
+            for ms in (HANDOFF_MS..=STARTUP_DURATION_MS).step_by(16) {
                 let mut frame = chat(area);
                 render_startup(
                     &mut frame,
@@ -371,7 +358,7 @@ mod tests {
             if let Some(idle) = idle {
                 idle.render(destination, &mut expected);
             }
-            for ms in [STARTUP_DURATION_MS - 1, STARTUP_DURATION_MS, u64::MAX] {
+            for ms in [STARTUP_DURATION_MS, u64::MAX] {
                 let mut frame = chat(area);
                 render_startup(
                     &mut frame,
@@ -388,6 +375,62 @@ mod tests {
     }
 
     #[test]
+    fn panels_fade_in_place_and_finish_within_650_ms() {
+        let area = Rect::new(3, 2, 100, 36);
+        let panels = [
+            Rect::new(3, 2, 100, 3),
+            Rect::new(3, 5, 24, 30),
+            Rect::new(28, 5, 75, 22),
+            Rect::new(28, 27, 75, 8),
+            Rect::new(3, 35, 100, 3),
+        ];
+        for (bg, fg) in [
+            (Color::Rgb(12, 24, 27), Color::Rgb(224, 239, 237)),
+            (Color::Rgb(255, 255, 255), Color::Rgb(25, 38, 37)),
+        ] {
+            let style = Style::default().bg(bg).fg(fg);
+            let mut blank = Buffer::empty(area);
+            blank.set_style(area, Style::default().bg(bg).fg(bg));
+            let mut ui = blank.clone();
+            for panel in panels {
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .title(" panel ")
+                    .style(style)
+                    .render(panel, &mut ui);
+            }
+            let (r, g, b) = rgb(bg);
+            let contrast = |color| {
+                let (fr, fg, fb) = rgb(color);
+                u16::from(fr.abs_diff(r)) + u16::from(fg.abs_diff(g)) + u16::from(fb.abs_diff(b))
+            };
+            let mut previous = vec![0; ui.content.len()];
+            for ms in (HANDOFF_MS..HANDOFF_MS + 650).step_by(16) {
+                let mut frame = blank.clone();
+                reveal_panels(&mut frame, &ui, ms, &panels, 0.0);
+                for (index, (cell, expected)) in frame.content.iter().zip(&ui.content).enumerate() {
+                    if cell.symbol() != " " {
+                        assert_eq!(cell.symbol(), expected.symbol(), "shifted panel at {ms}ms");
+                        let current = contrast(cell.fg);
+                        assert!(current >= previous[index], "panel faded back at {ms}ms");
+                        previous[index] = current;
+                    }
+                }
+                if ms >= HANDOFF_MS + 150 {
+                    for panel in panels {
+                        let corner = &frame[(panel.x, panel.y)];
+                        assert_eq!(corner.symbol(), "╭");
+                        assert!(contrast(corner.fg) > 0, "panel delayed at {ms}ms");
+                    }
+                }
+            }
+            let mut settled = blank.clone();
+            reveal_panels(&mut settled, &ui, HANDOFF_MS + 650, &panels, 0.0);
+            assert_eq!(settled, ui);
+        }
+    }
+
+    #[test]
     fn light_theme_has_no_bright_background_boxes_around_revealing_borders() {
         let area = Rect::new(0, 0, 80, 24);
         let mut ui = Buffer::empty(area);
@@ -398,7 +441,7 @@ mod tests {
         for cell in &mut ui.content {
             cell.set_bg(Color::Rgb(255, 255, 255));
         }
-        for ms in (HANDOFF_MS..=SETTLED_MS).step_by(16) {
+        for ms in (HANDOFF_MS..=STARTUP_DURATION_MS).step_by(16) {
             let mut frame = ui.clone();
             render_startup(&mut frame, ms, &[area], Handoff { area, idle: None });
             assert_eq!(

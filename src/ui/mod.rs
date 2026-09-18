@@ -19,6 +19,7 @@ mod conversation;
 mod error;
 mod footer;
 mod header;
+pub(crate) mod idle_titan;
 pub(crate) mod markdown;
 mod markdown_view;
 pub(crate) mod mouse;
@@ -41,6 +42,7 @@ use ratatui::{
 };
 
 use crate::app::App;
+use std::time::Instant;
 
 #[cfg(test)]
 pub(crate) use chat::input_is_focused;
@@ -54,6 +56,10 @@ pub(crate) fn spinner_frame(ticks: u64) -> &'static str {
 
 /// 渲染整帧。
 pub fn draw(frame: &mut Frame, app: &App) {
+    draw_at(frame, app, Instant::now());
+}
+
+fn draw_at(frame: &mut Frame, app: &App, now: Instant) {
     app.mouse.borrow_mut().clear();
     let palette = theme::palette(app.settings.theme);
     frame.render_widget(Block::new().style(palette.base()), frame.area());
@@ -85,13 +91,28 @@ pub fn draw(frame: &mut Frame, app: &App) {
         (sidebar, content)
     };
 
+    let [messages_area, input_area] = chat::areas(content_area);
+    if app.startup.is_some() {
+        app.idle_titan.settle(app.show_idle_titan());
+    } else if !app.idle_titan_area_available() {
+        app.idle_titan.settle(false);
+    } else {
+        let visible = !transcript::content_area(messages_area).is_empty()
+            && app.modal.is_none()
+            && app.picker.is_none()
+            && app.conversation_overlay.is_none()
+            && app.code_overlay.is_none()
+            && app.activity_overlay.is_none()
+            && app.error_detail.is_none();
+        app.idle_titan.update(app.show_idle_titan(), visible, now);
+    }
+
     header::render(app, header_area, frame.buffer_mut(), palette);
     sidebar::render(app, sidebar_area, frame.buffer_mut(), palette);
     chat::render(frame, app, content_area, palette);
     footer::render(app, footer_area, frame.buffer_mut(), palette);
 
     if let Some(startup) = &app.startup {
-        let [messages_area, input_area] = chat::areas(content_area);
         titan::render_startup(
             frame.buffer_mut(),
             startup.elapsed_ms(),
@@ -222,22 +243,146 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_titan_disappears_for_drafts_and_history_and_obeys_its_setting() {
+    async fn idle_actions_keep_the_layout_and_cursor_stable_and_fade_from_the_current_pose() {
+        use std::time::Duration;
         let mut app = App::new(Settings::default(), vec![Session::new()]);
-        assert!(render_text(&app, 120, 42).contains('◉'));
-        for draft in ["hello", " ", "\n", "你好"] {
-            app.editor.set_text(draft);
-            assert!(!render_text(&app, 120, 42).contains('◉'));
+        let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        terminal.draw(|frame| draw_at(frame, &app, at(0))).unwrap();
+        let rest = terminal.backend().buffer().clone();
+        let [messages, _] = chat::areas(Rect::new(29, 3, 91, 36));
+        let content = transcript::content_area(messages);
+        for ms in [5_700, 20_700, 35_100] {
+            terminal.draw(|frame| draw_at(frame, &app, at(ms))).unwrap();
+            assert!(terminal.backend().cursor_visible());
+            let frame = terminal.backend().buffer();
+            assert_ne!(frame, &rest);
+            for y in 0..42 {
+                for x in 0..120 {
+                    if !content.contains((x, y).into()) {
+                        assert_eq!(frame[(x, y)], rest[(x, y)]);
+                    }
+                }
+            }
         }
-        app.editor.clear();
-        assert!(render_text(&app, 120, 42).contains('◉'));
-        app.settings.show_titan_when_idle = false;
-        assert!(!render_text(&app, 120, 42).contains('◉'));
-        app.settings.show_titan_when_idle = true;
-        app.sessions[0]
-            .messages
-            .push(Message::user("history".into(), None));
-        assert!(!render_text(&app, 120, 42).contains('◉'));
+        let gesture = terminal.backend().buffer().clone();
+        app.editor.set_text("你好");
+        terminal
+            .draw(|frame| draw_at(frame, &app, at(35_100)))
+            .unwrap();
+        for y in content.y..content.bottom() {
+            for x in content.x..content.right() {
+                assert_eq!(terminal.backend().buffer()[(x, y)], gesture[(x, y)]);
+            }
+        }
+        terminal
+            .draw(|frame| draw_at(frame, &app, at(35_190)))
+            .unwrap();
+        assert!(terminal.backend().cursor_visible());
+        for y in content.y..content.bottom() {
+            for x in content.x..content.right() {
+                assert_eq!(
+                    terminal.backend().buffer()[(x, y)].symbol(),
+                    gesture[(x, y)].symbol()
+                );
+            }
+        }
+        terminal
+            .draw(|frame| draw_at(frame, &app, at(35_300)))
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|c| c.symbol() != "◉")
+        );
+        assert!(app.next_animation_frame().is_none());
+    }
+
+    #[tokio::test]
+    async fn idle_titan_fades_for_drafts_and_never_covers_messages() {
+        use ratatui::buffer::Buffer;
+        use std::time::Duration;
+
+        let now = Instant::now();
+        let render = |app: &App, ms: u64| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+            terminal
+                .draw(|frame| draw_at(frame, app, now + Duration::from_millis(ms)))
+                .unwrap();
+            assert!(terminal.backend().cursor_visible());
+            terminal.backend().buffer().clone()
+        };
+        let sensor = |buffer: &Buffer| {
+            buffer
+                .content
+                .iter()
+                .find(|cell| cell.symbol() == "◉")
+                .map(|cell| cell.fg)
+        };
+        for theme in Theme::ALL {
+            let mut app = App::new(
+                Settings {
+                    theme,
+                    ..Settings::default()
+                },
+                vec![Session::new()],
+            );
+            let full = sensor(&render(&app, 0));
+            assert!(full.is_some());
+            let mut ms = 0;
+            for draft in ["hello", " ", "\n", "你好"] {
+                ms += 1_000;
+                app.editor.set_text(draft);
+                assert_eq!(sensor(&render(&app, ms)), full);
+                assert!(app.next_animation_frame().is_some());
+                assert_eq!(app.next_animation_frame(), app.idle_titan.next_frame());
+                let fading = sensor(&render(&app, ms + 90));
+                assert!(fading.is_some());
+                assert_ne!(fading, full);
+                assert_ne!(fading, Some(theme::palette(theme).surface));
+                assert!(sensor(&render(&app, ms + 200)).is_none());
+                assert!(app.next_animation_frame().is_none());
+
+                app.editor.clear();
+                assert!(sensor(&render(&app, ms + 400)).is_none());
+                let appearing = sensor(&render(&app, ms + 530));
+                assert!(appearing.is_some());
+                assert_ne!(appearing, full);
+                assert_eq!(sensor(&render(&app, ms + 680)), full);
+                assert!(
+                    app.next_animation_frame().unwrap() > now + Duration::from_millis(ms + 1_000)
+                );
+            }
+            app.settings.show_titan_when_idle = false;
+            render(&app, ms + 1_000);
+            assert!(sensor(&render(&app, ms + 1_200)).is_none());
+            app.settings.show_titan_when_idle = true;
+            render(&app, ms + 1_400);
+            assert_eq!(sensor(&render(&app, ms + 1_700)), full);
+
+            app.editor.set_text("sending");
+            render(&app, ms + 1_800);
+            assert!(sensor(&render(&app, ms + 1_860)).is_some());
+            app.sessions[0]
+                .messages
+                .push(Message::user("history".into(), None));
+            app.editor.clear();
+            let frame = render(&app, ms + 1_860);
+            assert!(sensor(&frame).is_none());
+            assert!(
+                frame
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("history")
+            );
+            assert!(app.idle_titan.next_frame().is_none());
+        }
     }
 
     #[tokio::test]
@@ -262,10 +407,10 @@ mod tests {
                     1_350,
                     1_550,
                     2_300,
+                    2_750,
                     3_000,
-                    3_500,
-                    3_900,
-                    4_799,
+                    3_250,
+                    titan::STARTUP_DURATION_MS - 1,
                     titan::STARTUP_DURATION_MS,
                 ] {
                     app.startup
@@ -281,7 +426,7 @@ mod tests {
                 app.startup
                     .as_mut()
                     .unwrap()
-                    .advance(now + Duration::from_millis(4_799));
+                    .advance(now + Duration::from_millis(titan::STARTUP_DURATION_MS - 1));
                 terminal.draw(|frame| draw(frame, &app)).unwrap();
                 for (before, after) in terminal
                     .backend()

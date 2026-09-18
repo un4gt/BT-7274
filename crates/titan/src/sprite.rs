@@ -113,7 +113,16 @@ const MINI_STANDING: &[&str] = &[r"    /#/\_/\#\", r"   [=]/   \[=]", r"  /__|  
 const MINI_KNEELING: &[&str] = &[r"   /#/\__/\#\__", r" /__|      \_|_\"];
 
 #[derive(Clone, Copy, Debug)]
+pub(crate) enum Format {
+    Detailed,
+    Compact,
+    Mini,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct Chassis {
+    pub origin: (i32, i32),
+    pub format: Format,
     pub eye: (i32, i32),
     pub left_nozzle: (i32, i32),
     pub right_nozzle: (i32, i32),
@@ -248,6 +257,14 @@ pub fn draw(canvas: &mut Canvas, time: Timeline, ground: i32, detailed: bool) ->
         .find_map(|(y, row)| row.find('@').map(|x| (y, x)))
         .expect("sensor anchor in BT sprite");
     Chassis {
+        origin,
+        format: if detailed {
+            Format::Detailed
+        } else if mini {
+            Format::Mini
+        } else {
+            Format::Compact
+        },
         eye: (
             origin.0 + (eye_x as f32 * scale).round() as i32,
             origin.1 + (eye_y as f32 * scale).round() as i32,

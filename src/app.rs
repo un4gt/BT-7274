@@ -24,7 +24,7 @@ use crate::runtime::{
 };
 use crate::text::normalize_newlines;
 use crate::ui::mouse::{MouseMap, MouseTarget};
-use crate::ui::{self, markdown::MarkdownCodeBlock, sparkle::Sparkle};
+use crate::ui::{self, idle_titan::IdleTitan, markdown::MarkdownCodeBlock, sparkle::Sparkle};
 use crate::ui::{activity::ActivityOverlay, transcript::ChatViewState};
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -877,6 +877,7 @@ pub struct App {
     pub editor: ChatEditor,
     /// 输入框星空的显示状态和下一帧截止时间。
     pub(crate) sparkle: Sparkle,
+    pub(crate) idle_titan: IdleTitan,
     pub(crate) startup: Option<crate::startup::Startup>,
     pub(crate) chat_view: RefCell<ChatViewState>,
     pub(crate) activity_overlay: Option<ActivityOverlay>,
@@ -930,6 +931,7 @@ impl App {
             running: true,
             events,
             sparkle: Sparkle::new(settings.whimsy),
+            idle_titan: IdleTitan::default(),
             startup: None,
             settings,
             modal: None,
@@ -1083,10 +1085,7 @@ impl App {
             }
             self.events
                 .set_animation_enabled(self.periodic_tick_required());
-            let next_frame = self
-                .startup
-                .as_ref()
-                .map_or_else(|| self.sparkle.next_frame(), |startup| startup.next_frame());
+            let next_frame = self.next_animation_frame();
             let event = tokio::select! {
                 event = self.events.next() => event?,
                 _ = async {
@@ -1113,9 +1112,13 @@ impl App {
                     crossterm::event::Event::Mouse(mouse) => {
                         self.handle_mouse_events(mouse);
                     }
-                    crossterm::event::Event::FocusGained => self.sparkle.set_terminal_focus(true),
+                    crossterm::event::Event::FocusGained => {
+                        self.sparkle.set_terminal_focus(true);
+                        self.idle_titan.set_terminal_focus(true);
+                    }
                     crossterm::event::Event::FocusLost => {
                         self.sparkle.set_terminal_focus(false);
+                        self.idle_titan.set_terminal_focus(false);
                         self.mouse.borrow_mut().dragging_input = false;
                     }
                     _ => {}
@@ -1132,8 +1135,16 @@ impl App {
             return;
         };
         match event {
-            crossterm::event::Event::FocusLost => startup.set_focus(false, Instant::now()),
-            crossterm::event::Event::FocusGained => startup.set_focus(true, Instant::now()),
+            crossterm::event::Event::FocusLost => {
+                startup.set_focus(false, Instant::now());
+                self.sparkle.set_terminal_focus(false);
+                self.idle_titan.set_terminal_focus(false);
+            }
+            crossterm::event::Event::FocusGained => {
+                startup.set_focus(true, Instant::now());
+                self.sparkle.set_terminal_focus(true);
+                self.idle_titan.set_terminal_focus(true);
+            }
             crossterm::event::Event::Key(key)
                 if key.kind == crossterm::event::KeyEventKind::Press =>
             {
@@ -1150,12 +1161,28 @@ impl App {
 
     pub(crate) fn show_idle_titan(&self) -> bool {
         self.settings.show_titan_when_idle
-            && self.open_session().messages.is_empty()
+            && self.editor.text().is_empty()
+            && self.idle_titan_area_available()
+    }
+
+    pub(crate) fn idle_titan_area_available(&self) -> bool {
+        self.open_session().messages.is_empty()
             && self.open_session().compactions.is_empty()
             && self.open_session().summary.is_none()
-            && self.editor.text().is_empty()
             && !self.generating()
             && self.notice().is_none()
+    }
+
+    pub(crate) fn next_animation_frame(&self) -> Option<Instant> {
+        self.startup.as_ref().map_or_else(
+            || {
+                [self.sparkle.next_frame(), self.idle_titan.next_frame()]
+                    .into_iter()
+                    .flatten()
+                    .min()
+            },
+            |startup| startup.next_frame(),
+        )
     }
 
     fn periodic_tick_required(&self) -> bool {

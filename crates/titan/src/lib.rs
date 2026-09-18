@@ -3,6 +3,7 @@
 
 mod effects;
 mod idle;
+mod idle_motion;
 mod paint;
 mod portrait;
 mod sprite;
@@ -10,6 +11,7 @@ mod timeline;
 mod transition;
 
 pub use idle::Idle;
+pub use idle_motion::{IdleAction, IdleAnimation};
 pub use timeline::DURATION_MS;
 pub use transition::{Handoff, STARTUP_DURATION_MS, render_startup};
 

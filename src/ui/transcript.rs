@@ -123,8 +123,10 @@ pub(super) fn render_messages(app: &App, area: Rect, buf: &mut Buffer, palette: 
     Paragraph::new(window.lines)
         .style(palette.surface())
         .render(content, buf);
-    if app.startup.is_none() && app.show_idle_titan() {
-        titan::Idle::new(palette.surface, palette.art_body, palette.accent).render(content, buf);
+    if app.startup.is_none() && app.idle_titan_area_available() {
+        titan::Idle::new(palette.surface, palette.art_body, palette.accent)
+            .animate(app.idle_titan.animation())
+            .render_with_opacity(content, buf, app.idle_titan.opacity());
     }
     if show_scrollbar && let Some(metrics) = window.scrollbar {
         StatefulWidget::render(

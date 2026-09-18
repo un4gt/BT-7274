@@ -1,6 +1,7 @@
 """Render actual TUI frames exported by the ignored export_titan_preview Rust test."""
 
 import json
+from html import escape
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -19,13 +20,13 @@ symbol_font = ImageFont.truetype(str(SYMBOL if SYMBOL.exists() else FONT), 14)
 label_font = ImageFont.truetype(str(FONT), 17)
 
 HTML = """<!doctype html><html lang="zh"><meta charset="utf-8">
-<title>BT-7274 启动动画预览</title>
+<title>BT-7274 · __TITLE__</title>
 <style>
 body{background:#101719;color:#d7e9e6;font:15px system-ui;margin:28px auto;max-width:1240px}
 canvas{display:block;max-width:100%;height:auto;border:1px solid #304b4c;margin:20px auto}
 button{background:#163234;color:#e0efed;border:1px solid #2dd4bf;padding:8px 18px;cursor:pointer}
 input{width:60%;vertical-align:middle;margin:0 18px} p{color:#809795}
-</style><h2>BT-7274 · 降落 → 震屏 → 聊天界面</h2>
+</style><h2>BT-7274 · __TITLE__</h2>
 <p>真实 Ratatui 绘制结果 · 拖动时间轴查看每一帧</p>
 <button id="play">暂停</button><input id="seek" type="range" min="0" max="__DURATION__" value="0"><span id="time"></span>
 <canvas id="screen"></canvas>
@@ -63,8 +64,8 @@ def export(path):
                     draw.text(((x + dx) * 10, y * 20 + 10), glyph, font=font, fill=fg, anchor="lm")
         return image
 
-    steps = [(500, "DESCENT"), (1350, "IMPACT"), (2750, "HANDOFF START"), (3150, "EASE IN"),
-             (3550, "MOVE & SCALE"), (3950, "CHAT REVEAL"), (4400, "EASE OUT"), (data["duration"], "READY")]
+    steps = data.get("steps", [(500, "DESCENT"), (1350, "IMPACT"), (2750, "HANDOFF START"), (2917, "FADE IN PLACE"),
+             (3083, "MOVE & SCALE"), (3250, "FRAMES READY"), (3400, "PANELS READY"), (data["duration"], "READY")])
     tile_w = min(data["width"] * 10, 720)
     tile_h = data["height"] * 20 * tile_w // (data["width"] * 10)
     sheet = Image.new("RGB", (tile_w * 2 + 48, (tile_h + 42) * 4 + 16), "#101719")
@@ -76,10 +77,12 @@ def export(path):
     sheet.save(path.with_suffix(".png"))
     render(data["duration"]).save(path.with_name(path.stem + "-ready.png"))
     embedded = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
-    path.with_suffix(".html").write_text(HTML.replace("__DATA__", embedded).replace("__DURATION__", str(data["duration"])), encoding="utf-8")
+    title = escape(data.get("title", "降落 → 震屏 → 聊天界面"))
+    page = HTML.replace("__TITLE__", title).replace("__DATA__", embedded).replace("__DURATION__", str(data["duration"]))
+    path.with_suffix(".html").write_text(page, encoding="utf-8")
     print(path.with_suffix(".html"))
 
 
 if __name__ == "__main__":
-    for name in ["desktop", "compact", "paper", "no-idle"]:
-        export(ROOT / f"{name}.json")
+    for path in sorted(ROOT.glob("*.json")):
+        export(path)

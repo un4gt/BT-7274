@@ -351,6 +351,8 @@ mod tests {
     #[test]
     fn thrusters_stay_lit_through_the_extended_burn_and_shut_off_after_contact() {
         let chassis = Chassis {
+            origin: (0, 0),
+            format: crate::sprite::Format::Detailed,
             eye: (40, 8),
             left_nozzle: (25, 8),
             right_nozzle: (55, 8),
