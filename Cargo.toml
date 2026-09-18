@@ -1,6 +1,6 @@
 [package]
 name = "bt-7274"
-version = "0.1.0"
+version = "0.2.0"
 description = "A minimal terminal AI chat TUI (ratatui + async-openai)"
 authors = ["un4gt <mt3085570450@outlook.com>"]
 license = "MIT"
