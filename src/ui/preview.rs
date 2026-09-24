@@ -12,9 +12,52 @@ use crate::{
     app::App,
     config::{Settings, Theme},
     i18n::Lang,
-    session::Session,
+    session::{Message, MessageStatus, Session},
     startup::Startup,
 };
+
+#[tokio::test]
+#[ignore = "exports independent message cards and clipped scrolling for visual review"]
+async fn export_transcript_preview() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/transcript-preview");
+    std::fs::create_dir_all(&directory).unwrap();
+    let settings = Settings {
+        theme: Theme::Carbon,
+        ..Settings::default()
+    };
+    let mut session = Session::new();
+    session.title = Some("消息卡片与滚动视口".into());
+    for (index, source) in [
+        "每条消息独立排版，统一在主面板中滚动。",
+        "## Markdown\n\n**中文内容**与 `inline code` 保留样式。☕️\n\n- 消息使用独立绘制区域\n- 滚动条使用单独布局列",
+        "```bash\ngit fetch origin\ngit switch --track origin/feature\n```",
+        "| 区域 | 职责 |\n|---|---|\n| 消息卡片 | 边框、内边距、Markdown |\n| 外层视口 | 统一滚动、裁剪、阅读锚点 |\n| 滚动条 | 独立列，间隔一列空白 |",
+        "长消息可以滚出视口；继续生成时，正在阅读的历史位置保持稳定。",
+    ].into_iter().enumerate() {
+        let mut message = Message::assistant_streaming(settings.default_selection());
+        message.append_text(&format!("消息 {}\n\n{source}", index + 1));
+        message.finish(MessageStatus::Completed);
+        session.messages.push(message);
+    }
+    let app = App::new(settings, vec![session]);
+    for (name, width, height) in [("wide", 120, 42), ("compact", 80, 26)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut frames = Vec::new();
+        app.chat_view.borrow_mut().follow_latest();
+        terminal.draw(|frame| super::draw(frame, &app)).unwrap();
+        for delta in [-1_000, 5, 7, 1_000] {
+            app.chat_view.borrow_mut().scroll_by(delta);
+            terminal.draw(|frame| super::draw(frame, &app)).unwrap();
+            frames.push(encode_frame(terminal.backend().buffer()));
+        }
+        std::fs::write(
+            directory.join(format!("{name}.json")),
+            serde_json::to_vec(&json!({"width": width, "height": height, "frames": frames}))
+                .unwrap(),
+        )
+        .unwrap();
+    }
+}
 
 #[tokio::test]
 #[ignore = "exports animation frames to target/titan-preview for visual review"]

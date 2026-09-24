@@ -131,11 +131,11 @@ mod tests {
 
         let window = build_message_window(&app, 48, 20, 0, palette);
 
-        assert_eq!(window.lines.len(), 20);
+        assert_eq!(window.lines().len(), 20);
         assert!(window.rendered_messages < 32);
         assert!(
             window
-                .lines
+                .lines()
                 .iter()
                 .any(|line| line.to_string().contains("message 9999"))
         );
@@ -156,7 +156,7 @@ mod tests {
 
         for width in [4, 7, 16, 40] {
             let window = build_message_window(&app, width, 24, 0, palette);
-            assert!(window.lines.iter().all(|line| line.width() <= width));
+            assert!(window.lines().iter().all(|line| line.width() <= width));
         }
     }
 
@@ -171,7 +171,7 @@ mod tests {
         let palette = theme::palette(app.settings.theme);
 
         let first = build_message_window(&app, 40, 8, 0, palette)
-            .lines
+            .lines()
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
@@ -181,7 +181,7 @@ mod tests {
 
         app.ticks = 1;
         let second = build_message_window(&app, 40, 8, 0, palette)
-            .lines
+            .lines()
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
@@ -246,9 +246,9 @@ mod tests {
         let palette = theme::palette(app.settings.theme);
 
         let narrow = build_message_window(&app, 24, 30, 0, palette);
-        assert!(narrow.lines.iter().all(|line| line.width() <= 24));
+        assert!(narrow.lines().iter().all(|line| line.width() <= 24));
         let rendered = build_message_window(&app, 80, 30, 0, palette)
-            .lines
+            .lines()
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
@@ -266,7 +266,7 @@ mod tests {
         ))
         .unwrap();
         let expanded = build_message_window(&app, 80, 30, 0, palette)
-            .lines
+            .lines()
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
@@ -320,9 +320,9 @@ mod tests {
         app.sessions[0].messages[0].append_text(&"\nmore answer".repeat(60));
         build_message_window(&app, 48, 8, 0, palette);
         app.chat_view.borrow_mut().scroll_by(-16);
-        let before = build_message_window(&app, 48, 8, 0, palette).lines;
+        let before = build_message_window(&app, 48, 8, 0, palette).lines();
         app.sessions[0].messages[0].append_text(&"\nnew stream output".repeat(25));
-        let after = build_message_window(&app, 48, 8, 0, palette).lines;
+        let after = build_message_window(&app, 48, 8, 0, palette).lines();
         assert_eq!(
             before, after,
             "new output must not displace history being read"

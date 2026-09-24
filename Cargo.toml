@@ -39,6 +39,9 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 tui-markdown = "0.3.9"
 unicode-segmentation = "1.12"
 
+[dev-dependencies]
+vt100 = { version = "0.16.2", default-features = false }
+
 # Read the optimization guideline for more details: https://ratatui.rs/recipes/apps/release-your-app/#optimizations
 [profile.release]
 codegen-units = 1

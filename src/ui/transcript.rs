@@ -1,4 +1,4 @@
-//! Transcript layout: ordered answers, compact process groups, and anchored history reading.
+//! 独立消息卡片组成可裁剪的滚动视口；滚动条拥有单独的布局区域。
 use super::{
     activity::BlockRef, markdown_view::MarkdownView, mouse::MouseTarget, spinner_frame,
     theme::Palette, tool_view,
@@ -11,12 +11,12 @@ use crate::{
 };
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        StatefulWidget, Widget,
+        Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, StatefulWidget, Widget,
     },
 };
 
@@ -66,6 +66,15 @@ struct Row {
     line: Line<'static>,
     key: Option<RowKey>,
     activity: Option<BlockRef>,
+    kind: RowKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    Plain,
+    MessageTop,
+    MessageBody,
+    MessageBottom,
 }
 
 pub(super) struct ScrollbarMetrics {
@@ -73,21 +82,127 @@ pub(super) struct ScrollbarMetrics {
     pub position: usize,
 }
 pub(super) struct MessageWindow {
-    pub lines: Vec<Line<'static>>,
+    rows: Vec<Row>,
+    padding: usize,
     pub scrollbar: Option<ScrollbarMetrics>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub rendered_messages: usize,
 }
 
+/// 正文视口、空白间隔和滚动条在布局阶段分开，子消息只能绘制到视口内。
+struct TranscriptLayout {
+    viewport: Rect,
+    scrollbar: Rect,
+}
+
+impl TranscriptLayout {
+    fn new(area: Rect) -> Self {
+        let inner = Block::bordered().inner(area);
+        let show_scrollbar = inner.width >= 4;
+        let [viewport, _, scrollbar] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(u16::from(show_scrollbar)),
+            Constraint::Length(u16::from(show_scrollbar)),
+        ])
+        .areas(inner);
+        Self {
+            viewport,
+            scrollbar,
+        }
+    }
+}
+
 pub(super) fn content_area(area: Rect) -> Rect {
-    let inner = Block::bordered().inner(area);
-    Rect {
-        width: inner.width.saturating_sub(u16::from(inner.width >= 4)),
-        ..inner
+    TranscriptLayout::new(area).viewport
+}
+
+impl MessageWindow {
+    #[cfg(test)]
+    pub(super) fn lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::default(); self.padding];
+        lines.extend(self.rows.iter().map(|row| row.line.clone()));
+        lines
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer, palette: Palette) {
+        if area.is_empty() {
+            return;
+        }
+        let mut viewport = Buffer::empty(area);
+        viewport.set_style(area, palette.surface());
+        let mut offset = self.padding;
+        for rows in self.rows.chunk_by(|a, b| {
+            if a.kind == RowKind::Plain || b.kind == RowKind::Plain {
+                a.kind == b.kind
+            } else {
+                a.key.as_ref().map(|key| &key.block.message_id)
+                    == b.key.as_ref().map(|key| &key.block.message_id)
+            }
+        }) {
+            let message_area = Rect::new(
+                area.x,
+                area.y + offset as u16,
+                area.width,
+                rows.len() as u16,
+            )
+            .intersection(area);
+            // 每个可见消息片段使用有边界的独立缓冲区，不能覆盖相邻消息。
+            let mut message = Buffer::empty(message_area);
+            if rows[0].kind == RowKind::Plain || area.width < 6 {
+                Paragraph::new(rows.iter().map(|row| row.line.clone()).collect::<Vec<_>>())
+                    .style(palette.surface())
+                    .render(message_area, &mut message);
+            } else {
+                let mut borders = Borders::LEFT | Borders::RIGHT;
+                let top = rows[0].kind == RowKind::MessageTop;
+                if top {
+                    borders |= Borders::TOP;
+                }
+                if rows
+                    .last()
+                    .is_some_and(|row| row.kind == RowKind::MessageBottom)
+                {
+                    borders |= Borders::BOTTOM;
+                }
+                let mut block = Block::new()
+                    .borders(borders)
+                    .border_type(BorderType::Rounded)
+                    .border_style(palette.border(false))
+                    .padding(Padding::horizontal(1))
+                    .style(palette.surface());
+                if top {
+                    block = block.title(rows[0].line.clone());
+                }
+                let inner = block.inner(message_area);
+                block.render(message_area, &mut message);
+                let lines = rows
+                    .iter()
+                    .filter(|row| row.kind == RowKind::MessageBody)
+                    .map(|row| row.line.clone())
+                    .collect::<Vec<_>>();
+                Paragraph::new(lines)
+                    .style(palette.surface())
+                    .render(inner, &mut message);
+            }
+            copy_buffer(&message, &mut viewport);
+            offset += rows.len();
+        }
+        copy_buffer(&viewport, buf);
+    }
+}
+
+fn copy_buffer(source: &Buffer, target: &mut Buffer) {
+    let area = source.area.intersection(target.area);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            target[(x, y)] = source[(x, y)].clone();
+        }
     }
 }
 
 pub(super) fn render_messages(app: &App, area: Rect, buf: &mut Buffer, palette: Palette) {
+    let area = area.intersection(buf.area);
+    Clear.render(area, buf);
     let hint = match app.settings.language {
         Lang::Zh => "点击过程 / F3 详情 · 滚轮 / PgUp/PgDn 历史",
         Lang::En => "Click process / F3 Details · Wheel / PgUp/PgDn History",
@@ -99,45 +214,54 @@ pub(super) fn render_messages(app: &App, area: Rect, buf: &mut Buffer, palette: 
         .title_bottom(
             Line::from(truncate_width(hint, area.width.saturating_sub(4) as usize)).right_aligned(),
         );
-    let inner = block.inner(area);
     block.render(area, buf);
-    let show_scrollbar = inner.width >= 4;
-    let content = content_area(area);
+    let layout = TranscriptLayout::new(area);
+    let content = layout.viewport;
     let window = build_message_window(
         app,
         content.width as usize,
-        inner.height as usize,
+        content.height as usize,
         0,
         palette,
     );
     {
         let mut mouse = app.mouse.borrow_mut();
         mouse.register(area, MouseTarget::Messages);
+        let inset = if content.width >= 6 { 2 } else { 0 };
         for (row, key) in &app.chat_view.borrow().activity_rows {
             mouse.register(
-                Rect::new(content.x, content.y + *row as u16, content.width, 1),
+                Rect::new(
+                    content.x + inset,
+                    content.y + *row as u16,
+                    content.width.saturating_sub(inset * 2),
+                    1,
+                ),
                 MouseTarget::Activity(key.clone()),
             );
         }
     }
-    Paragraph::new(window.lines)
-        .style(palette.surface())
-        .render(content, buf);
+    window.render(content, buf, palette);
     if app.startup.is_none() && app.idle_titan_area_available() {
         titan::Idle::new(palette.surface, palette.art_body, palette.accent)
             .animate(app.idle_titan.animation())
             .render_with_opacity(content, buf, app.idle_titan.opacity());
     }
-    if show_scrollbar && let Some(metrics) = window.scrollbar {
+    if !layout.scrollbar.is_empty()
+        && let Some(metrics) = window.scrollbar
+    {
         StatefulWidget::render(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .style(Style::default().fg(palette.border).bg(palette.surface))
                 .thumb_style(Style::default().fg(palette.primary).bg(palette.surface)),
-            inner,
+            layout.scrollbar,
             buf,
-            &mut ScrollbarState::new(metrics.content_length.saturating_sub(inner.height as usize))
-                .position(metrics.position)
-                .viewport_content_length(inner.height as usize),
+            &mut ScrollbarState::new(
+                metrics
+                    .content_length
+                    .saturating_sub(content.height as usize),
+            )
+            .position(metrics.position)
+            .viewport_content_length(content.height as usize),
         );
     }
 }
@@ -154,7 +278,8 @@ pub(super) fn build_message_window(
         state.activity_rows.clear();
         state.visible_activity = None;
         return MessageWindow {
-            lines: Vec::new(),
+            rows: Vec::new(),
+            padding: 0,
             scrollbar: None,
             rendered_messages: 0,
         };
@@ -172,14 +297,12 @@ pub(super) fn build_message_window(
     }
     let count = session.messages.len();
     if count == 0 {
-        let lines = notice_rows(app, width, palette)
-            .into_iter()
-            .map(|row| row.line)
-            .collect::<Vec<_>>();
+        let rows = notice_rows(app, width, palette);
         state.visible_activity = None;
         state.activity_rows.clear();
         return MessageWindow {
-            lines,
+            rows,
+            padding: 0,
             scrollbar: None,
             rendered_messages: 0,
         };
@@ -284,15 +407,9 @@ pub(super) fn build_message_window(
         .enumerate()
         .filter_map(|(row, entry)| entry.activity.clone().map(|key| (padding + row, key)))
         .collect();
-    let mut lines = vec![Line::default(); padding];
-    lines.extend(
-        rows.into_iter()
-            .skip(start)
-            .take(end - start)
-            .map(|row| row.line),
-    );
     MessageWindow {
-        lines,
+        rows: rows.into_iter().skip(start).take(end - start).collect(),
+        padding,
         scrollbar,
         rendered_messages,
     }
@@ -315,6 +432,7 @@ fn keyed_lines(message: &Message, block_id: u64, lines: Vec<Line<'static>>) -> V
                 line,
                 key: Some(key),
                 activity: None,
+                kind: RowKind::Plain,
             }
         })
         .collect()
@@ -327,6 +445,7 @@ fn message_rows(
     palette: Palette,
     markdown_view: &mut MarkdownView,
 ) -> Vec<Row> {
+    let width = if width >= 6 { width - 4 } else { width };
     let lang = app.settings.language;
     let (name, color) = match message.role {
         Role::User => (lang.texts().role_user, palette.user),
@@ -382,7 +501,13 @@ fn message_rows(
                 .collect(),
         ));
     }
-    rows.extend(keyed_lines(message, u64::MAX, vec![Line::default()]));
+    for row in &mut rows {
+        row.kind = RowKind::MessageBody;
+    }
+    rows[0].kind = RowKind::MessageTop;
+    let mut ending = keyed_lines(message, u64::MAX, vec![Line::default(), Line::default()]);
+    ending[0].kind = RowKind::MessageBottom;
+    rows.extend(ending);
     rows
 }
 
@@ -565,5 +690,9 @@ fn notice_rows(app: &App, width: usize, palette: Palette) -> Vec<Row> {
         )),
         key: None,
         activity: None,
+        kind: RowKind::Plain,
     }]
 }
+
+#[cfg(test)]
+mod tests;
