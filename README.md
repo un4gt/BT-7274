@@ -38,6 +38,15 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 cargo run --release
 ```
 
+命令行参数：
+
+```shell
+bt-7274 --version  # 查看版本，简写 -V
+bt-7274 --help     # 查看帮助，简写 -h
+```
+
+不带参数启动聊天界面。从源码查看版本时使用 `cargo run --release -- --version`。
+
 聊天输入框支持 `/models` 打开模型列表、`/mcp` 打开已配置 MCP Server 列表。
 
 查看工具调用结果：点击消息中的“▸ … 项工具”过程记录，或按 `F3` 打开过程详情。

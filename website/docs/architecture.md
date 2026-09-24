@@ -157,6 +157,7 @@ Resources/Prompts 仍只展示能力标记。详细配置见 [mcp.md](mcp.md)。
 不能撤销上游依赖启用的功能。
 
 - 应用只使用 `futures-util` 的 `StreamExt::next` 和 `FutureExt::fuse`，不需要可选 features。
+- `clap` 仅启用 `std`、`help`、`usage`、`error-context`，使用 builder API 解析启动参数。
 - `serde`、`serde_json` 和 `url` 显式启用 `std`；`serde` 另需派生宏。
 - `toml` 保留 `std`、`serde`、`parse`、`display`，配置既要读取也要格式化保存。
 - `chrono/clock` 用于本地时间日志和按日滚动，`serde` 用于会话时间持久化。

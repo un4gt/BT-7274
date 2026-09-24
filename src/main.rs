@@ -32,8 +32,19 @@ impl Drop for TerminalGuard {
     }
 }
 
+fn main() -> color_eyre::Result<()> {
+    // Help, version and argument errors exit before runtime, logging or terminal setup.
+    clap::Command::new(env!("CARGO_PKG_NAME"))
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("终端 AI 聊天客户端")
+        .after_help("不带参数时启动交互式聊天界面。")
+        .get_matches();
+
+    run()
+}
+
 #[tokio::main]
-async fn main() -> color_eyre::Result<()> {
+async fn run() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let log_guard = logging::init()?;
     logging::install_redacted_panic_hook();

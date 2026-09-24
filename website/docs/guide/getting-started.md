@@ -36,6 +36,24 @@ cargo run --release
 cargo install --git https://github.com/un4gt/BT-7274 --locked
 ```
 
+## 命令行参数
+
+| 参数 | 作用 |
+| --- | --- |
+| `--version`、`-V` | 输出程序名和版本号后退出 |
+| `--help`、`-h` | 输出用法和可用参数后退出 |
+| 不带参数 | 启动交互式聊天界面 |
+
+版本号来自构建时的 `Cargo.toml`。帮助和版本查询的退出码为 `0`，无需 API Key，
+也不会加载配置、创建日志或初始化终端；未知参数会向标准错误输出提示，并以退出码 `2` 结束。
+
+从源码运行时，用 `--` 将参数传给程序：
+
+```shell
+cargo run --release -- --version
+cargo run --release -- --help
+```
+
 ## 第一次启动
 
 程序首次启动时会使用 OpenAI Chat Completions 与 `gpt-4o-mini` 作为默认配置。先在当前
