@@ -168,7 +168,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "dirs",
- "futures",
+ "futures-util",
  "pulldown-cmark",
  "ratatui",
  "reqwest",

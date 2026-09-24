@@ -150,6 +150,43 @@ Resources/Prompts 仍只展示能力标记。详细配置见 [mcp.md](mcp.md)。
 该标签允许输入文字时持续显示星空；[#44879](https://github.com/openai/codex/pull/44879) 引入的
 输入即淡出和 15 秒后结束属于另一套行为，本应用采用该标签的持续显示方式，并保留运行时开关的淡入淡出。
 
+## 依赖 features
+
+工作区的直接依赖统一关闭 `default-features`，按实际 API 显式启用功能。新增或升级依赖时，
+同时检查最终解析的 feature 集合；Cargo 对同一依赖的 features 取并集，根清单关闭默认功能
+不能撤销上游依赖启用的功能。
+
+- 应用只使用 `futures-util` 的 `StreamExt::next` 和 `FutureExt::fuse`，不需要可选 features。
+- `serde`、`serde_json` 和 `url` 显式启用 `std`；`serde` 另需派生宏。
+- `toml` 保留 `std`、`serde`、`parse`、`display`，配置既要读取也要格式化保存。
+- `chrono/clock` 用于本地时间日志和按日滚动，`serde` 用于会话时间持久化。
+- `tui-markdown/highlight-code` 用于代码块高亮和主题选择。
+- 应用仅调用普通字符宽度 API，不主动启用 `unicode-width/cjk`。普通中文宽度计算无需该
+  feature；它提供将东亚歧义字符按宽字符处理的 API。
+- MCP 测试服务器使用的 Tokio `net`、`io-util` 在 `dev-dependencies` 中单独声明。
+  正常构建中网络依赖也会启用这些 features。
+
+当前锁定版本中，以下功能仍由上游启用：
+
+| 上游依赖 | 仍会启用的功能 |
+| --- | --- |
+| `rmcp` | `futures/default`，包括 executor 和异步宏 |
+| `rmcp`、`tui-markdown` | `tracing/default`，包括 `attributes` |
+| `ratatui-crossterm` | `crossterm/default`，包括 `derive-more` |
+| `ratatui-core`、`ratatui-widgets`、`unicode-truncate` | `unicode-width/default`，包括 `cjk` |
+| `tui-markdown` | `pulldown-cmark/default` 和 `syntect/default`，包括 HTML 输出及语法/主题加载功能 |
+
+审计正常构建的 features，或追踪某项功能的来源：
+
+```sh
+cargo tree --locked --workspace -e normal,build -f '{p} [{f}]'
+cargo tree --locked -e features -i tracing
+cargo tree --locked -e features -i syntect
+```
+
+进一步裁剪上述传递功能需要上游调整依赖声明或更换实现，不能仅凭根清单中的
+`default-features = false` 推断编译依赖或二进制体积已经减少。
+
 ## 安全边界
 
 - API Key、敏感 Header、代理凭据和 MCP 凭据在日志与 Debug 输出中脱敏。

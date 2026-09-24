@@ -3,7 +3,7 @@
 
 use color_eyre::eyre::OptionExt;
 use crossterm::event::Event as CrosstermEvent;
-use futures::{FutureExt, StreamExt};
+use futures_util::{FutureExt, StreamExt};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};

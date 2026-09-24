@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::{Context, ContextCompat, Result, bail};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use reqwest::{
     Client, Request, Response, StatusCode,
     header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER, USER_AGENT},

@@ -14,32 +14,39 @@ default-members = [".", "crates/titan"]
 resolver = "3"
 
 [dependencies]
-titan = { path = "crates/titan" }
+# Keep direct features explicit; Cargo still unifies features requested by transitive dependencies.
+titan = { path = "crates/titan", default-features = false }
 crossterm = { version = "0.29.0", default-features = false, features = ["bracketed-paste", "event-stream", "windows"] }
-futures = { version = "0.3.32", default-features = false, features = ["std"] }
+# StreamExt::next and FutureExt::fuse need no optional features.
+futures-util = { version = "0.3.32", default-features = false }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 color-eyre = { version = "0.6.5", default-features = false, features = ["track-caller"] }
 async-openai = { version = "0.41.3", default-features = false, features = ["response-types"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "socks", "stream"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.9"
-dirs = "6.0"
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+# Settings are both deserialized and saved with to_string_pretty.
+toml = { version = "0.9", default-features = false, features = ["std", "serde", "parse", "display"] }
+dirs = { version = "6.0", default-features = false }
+# File logs rotate by local date, so Local::now requires clock.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-unicode-width = "0.2"
-url = "2.5"
+unicode-width = { version = "0.2", default-features = false }
+url = { version = "2.5", default-features = false, features = ["std"] }
 uuid = { version = "1.24", default-features = false, features = ["v4"] }
-tracing = "0.1"
-tracing-appender = "0.2"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-appender = { version = "0.2", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 rmcp = { version = "3.1.4", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
-tui-markdown = "0.3.9"
-unicode-segmentation = "1.12"
+# The Markdown renderer selects a BuiltinCodeTheme for each application theme.
+tui-markdown = { version = "0.3.9", default-features = false, features = ["highlight-code"] }
+unicode-segmentation = { version = "1.12", default-features = false }
 
 [dev-dependencies]
+# The MCP integration fixture runs a local HTTP server.
+tokio = { version = "1.52.3", default-features = false, features = ["io-util", "net"] }
 vt100 = { version = "0.16.2", default-features = false }
 
 # Read the optimization guideline for more details: https://ratatui.rs/recipes/apps/release-your-app/#optimizations
