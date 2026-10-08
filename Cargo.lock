@@ -169,7 +169,7 @@ name = "bt-7274"
 version = "0.4.0"
 dependencies = [
  "async-openai",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "color-eyre",
