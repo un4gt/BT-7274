@@ -8,6 +8,8 @@ use ratatui::layout::{Position, Rect};
 
 #[derive(Clone, Debug)]
 pub(crate) enum MouseTarget {
+    CommandMenu,
+    SlashCommand(crate::app::commands::SlashCommand),
     Messages,
     Activity(BlockRef),
     Input,

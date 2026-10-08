@@ -24,6 +24,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         PickerMode::SessionDefault => (texts.picker_session_title, texts.picker_session_hint),
         PickerMode::NextTurn => (texts.picker_turn_title, texts.picker_turn_hint),
     };
+    let title = if picker.from_command {
+        format!(
+            " {} · /model · {title} ",
+            super::commands::local_label(app.settings.language)
+        )
+    } else {
+        title.to_owned()
+    };
 
     dim_background(frame, palette);
     let area = popup_rect(frame.area(), 64, 20);
@@ -33,7 +41,11 @@ pub fn render(frame: &mut Frame, app: &App) {
         .border_type(BorderType::Rounded)
         .title(title)
         .title_bottom(Line::from(hint).right_aligned())
-        .border_style(palette.border(true))
+        .border_style(if picker.from_command {
+            Style::default().fg(palette.accent)
+        } else {
+            palette.border(true)
+        })
         .style(palette.surface());
     let inner = block.inner(area);
     block.render(area, frame.buffer_mut());

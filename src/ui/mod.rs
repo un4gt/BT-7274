@@ -15,6 +15,7 @@
 pub(crate) mod activity;
 mod chat;
 mod code;
+mod commands;
 mod conversation;
 mod error;
 mod footer;
@@ -100,6 +101,7 @@ fn draw_at(frame: &mut Frame, app: &App, now: Instant) {
         let visible = !transcript::content_area(messages_area).is_empty()
             && app.modal.is_none()
             && app.picker.is_none()
+            && app.commands.overlay.is_none()
             && app.conversation_overlay.is_none()
             && app.code_overlay.is_none()
             && app.activity_overlay.is_none()
@@ -143,6 +145,10 @@ fn draw_at(frame: &mut Frame, app: &App, now: Instant) {
     if app.picker.is_some() {
         app.mouse.borrow_mut().block_background();
         picker::render(frame, app);
+    }
+    if app.commands.overlay.is_some() {
+        app.mouse.borrow_mut().block_background();
+        commands::render_overlay(frame, app);
     }
     if app.conversation_overlay.is_some() {
         app.mouse.borrow_mut().block_background();
@@ -214,13 +220,18 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in buffer.area.y..buffer.area.bottom() {
+            let mut x = buffer.area.x;
+            while x < buffer.area.right() {
+                let symbol = buffer[(x, y)].symbol();
+                text.push_str(symbol);
+                x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+            }
+            text.push('\n');
+        }
+        text
     }
 
     fn assert_input_cursor(app: &App, width: u16, before: &str, under: &str) {
@@ -647,6 +658,50 @@ mod tests {
                 rendered.contains(expected),
                 "missing picker row: {expected}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_commands_render_local_panels_across_languages_and_terminal_sizes() {
+        for language in [crate::i18n::Lang::Zh, crate::i18n::Lang::En] {
+            let mut app = App::new(
+                Settings {
+                    language,
+                    ..Settings::default()
+                },
+                vec![Session::new()],
+            );
+            let label = commands::local_label(language);
+            app.editor.set_text("/");
+            draw_sizes(&app);
+            let text = render_text(&app, 120, 40);
+            for command in ["/model", "/effort", "/mcp"] {
+                assert!(text.contains(command));
+            }
+            assert!(text.contains(label));
+
+            for command in ["/model", "/effort", "/mcp"] {
+                app.editor.set_text(command);
+                app.handle_key_events(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                    .unwrap();
+                draw_sizes(&app);
+                let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+                terminal.draw(|frame| draw(frame, &app)).unwrap();
+                assert!(!terminal.backend().cursor_visible());
+                let text = render_text(&app, 120, 40);
+                assert!(text.contains(&format!("{label} · {command}")));
+                assert!(app.open_session().messages.is_empty());
+                app.handle_key_events(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                    .unwrap();
+                assert!(input_is_focused(&app));
+            }
+
+            app.editor.set_text("/unknown");
+            app.handle_key_events(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            draw_sizes(&app);
+            assert!(render_text(&app, 120, 40).contains(&format!("{label} · /unknown")));
+            assert!(app.open_session().messages.is_empty());
         }
     }
 

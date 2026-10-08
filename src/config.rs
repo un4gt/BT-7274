@@ -959,9 +959,45 @@ pub struct Provider {
     /// Provider 级静态 Header。Header 名统一规整为小写。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    /// 运行时模型目录元数据；不写入面向简单聊天客户端的用户配置。
-    #[serde(default, skip_serializing)]
+    /// 保存用户设置的请求参数；同步获得的模型能力仍只保留在运行时。
+    #[serde(
+        default,
+        skip_serializing_if = "model_parameters_are_empty",
+        serialize_with = "serialize_model_parameters"
+    )]
     pub model_settings: BTreeMap<String, ModelSettings>,
+}
+
+fn model_parameters_are_empty(settings: &BTreeMap<String, ModelSettings>) -> bool {
+    settings
+        .values()
+        .all(|model| model.parameters == ModelParameters::default())
+}
+
+fn serialize_model_parameters<S>(
+    settings: &BTreeMap<String, ModelSettings>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    #[derive(Serialize)]
+    struct SavedModel<'a> {
+        parameters: &'a ModelParameters,
+    }
+
+    let mut map = serializer.serialize_map(None)?;
+    for (name, model) in settings {
+        if model.parameters != ModelParameters::default() {
+            map.serialize_entry(
+                name,
+                &SavedModel {
+                    parameters: &model.parameters,
+                },
+            )?;
+        }
+    }
+    map.end()
 }
 
 impl fmt::Debug for Provider {
@@ -1433,7 +1469,7 @@ impl Settings {
     }
 
     /// 加载与保存时执行的结构校验。UI 内的代理即时校验仍由 `validate` 提供。
-    fn validate_document(&self) -> Result<()> {
+    pub(crate) fn validate_document(&self) -> Result<()> {
         self.validate().context("代理配置无效")?;
         if self.config_version != CURRENT_CONFIG_VERSION {
             bail!(
@@ -1595,6 +1631,10 @@ impl Settings {
     /// 保存配置，必要时创建父目录。
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
+        self.save_to(&path)
+    }
+
+    pub(crate) fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建配置目录失败: {}", parent.display()))?;
@@ -1606,7 +1646,7 @@ impl Settings {
         normalized.normalize();
         normalized.validate_document()?;
         let raw = toml::to_string_pretty(&normalized).context("序列化配置失败")?;
-        atomic_write_private(&path, raw.as_bytes())
+        atomic_write_private(path, raw.as_bytes())
             .with_context(|| format!("写入配置失败: {}", path.display()))?;
         Ok(())
     }
@@ -1804,9 +1844,10 @@ mod tests {
         serializable.providers[0].model_settings.insert(
             "gemini-2.5-flash".to_owned(),
             ModelSettings {
-                parameters: ModelParameters {
-                    temperature: Some(0.7),
-                    ..ModelParameters::default()
+                capabilities: ModelCapabilities {
+                    reasoning: CapabilitySupport::Supported,
+                    context_window: Some(100_000),
+                    ..ModelCapabilities::default()
                 },
                 ..ModelSettings::default()
             },
@@ -1817,6 +1858,97 @@ mod tests {
         assert!(!saved.contains("[providers.headers]"));
         assert!(!saved.contains("[providers.model_settings]"));
         assert!(!saved.contains("[mcp_servers.capabilities]"));
+    }
+
+    #[test]
+    fn saved_model_parameters_survive_reload_without_persisting_catalog_metadata() {
+        let path = std::env::temp_dir().join(format!("bt-7274-effort-{}.toml", Uuid::new_v4()));
+        for (kind, reasoning) in [
+            (
+                ApiKind::ChatCompletions,
+                ReasoningSettings::OpenAi {
+                    effort: "high".into(),
+                },
+            ),
+            (
+                ApiKind::Responses,
+                ReasoningSettings::OpenAi {
+                    effort: "medium".into(),
+                },
+            ),
+            (
+                ApiKind::AnthropicMessages,
+                ReasoningSettings::Anthropic {
+                    budget_tokens: 8192,
+                },
+            ),
+            (
+                ApiKind::GeminiGenerateContent,
+                ReasoningSettings::Gemini {
+                    thinking_budget: -1,
+                },
+            ),
+        ] {
+            let mut settings = Settings::default();
+            settings.providers[0].api_kind = kind;
+            let model = settings.model.clone();
+            let parameters = ModelParameters {
+                reasoning: Some(reasoning),
+                max_output_tokens: Some(16384),
+                ..ModelParameters::default()
+            };
+            settings.providers[0].model_settings.insert(
+                model.clone(),
+                ModelSettings {
+                    parameters: parameters.clone(),
+                    capabilities: ModelCapabilities {
+                        context_window: Some(200_000),
+                        ..ModelCapabilities::default()
+                    },
+                },
+            );
+            settings.save_to(&path).unwrap();
+            let restored = Settings::load_from_path(&path).unwrap();
+            assert_eq!(
+                restored.provider().settings_for_model(&model).parameters,
+                parameters
+            );
+            assert_eq!(
+                restored.provider().settings_for_model(&model).capabilities,
+                ModelCapabilities::default()
+            );
+            assert!(
+                !std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("capabilities")
+            );
+
+            settings.providers[0]
+                .model_settings
+                .get_mut(&model)
+                .unwrap()
+                .parameters
+                .reasoning = None;
+            settings.save_to(&path).unwrap();
+            let restored = Settings::load_from_path(&path).unwrap();
+            assert!(
+                restored
+                    .provider()
+                    .settings_for_model(&model)
+                    .parameters
+                    .reasoning
+                    .is_none()
+            );
+            assert_eq!(
+                restored
+                    .provider()
+                    .settings_for_model(&model)
+                    .parameters
+                    .max_output_tokens,
+                Some(16384)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -90,6 +90,41 @@ fn tool_message(settings: &Settings, name: &str, output: &str) -> Message {
 }
 
 #[tokio::test]
+async fn slash_menu_click_runs_command_and_its_overlay_blocks_background_clicks() {
+    let mut app = App::new(Settings::default(), vec![Session::new(), Session::new()]);
+    app.editor.set_text("/");
+    let terminal = draw(&app, 120, 40);
+    click(&mut app, &terminal, "/mcp");
+    assert!(matches!(
+        app.commands.overlay,
+        Some(crate::app::commands::CommandOverlay::Mcp { .. })
+    ));
+    assert!(app.editor.is_empty());
+    assert!(app.open_session().messages.is_empty());
+    let terminal = draw(&app, 120, 40);
+    assert!(rendered(&terminal).contains("本地命令 · /mcp"));
+    let current = app.current;
+    assert!(!mouse(
+        &mut app,
+        Position::new(4, 5),
+        MouseEventKind::Down(MouseButton::Left)
+    ));
+    assert_eq!(app.current, current);
+    assert!(mouse(
+        &mut app,
+        Position::new(60, 20),
+        MouseEventKind::ScrollDown
+    ));
+    app.handle_key_events(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    draw(&app, 120, 40);
+    let Some(crate::app::commands::CommandOverlay::Mcp { scroll }) = &app.commands.overlay else {
+        panic!("MCP overlay closed unexpectedly");
+    };
+    assert_eq!(scroll.get(), 0);
+}
+
+#[tokio::test]
 async fn click_opens_the_chosen_tool_and_tabs_scroll_without_changing_the_chat() {
     let settings = Settings::default();
     let output = format!(

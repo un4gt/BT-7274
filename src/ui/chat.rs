@@ -19,8 +19,10 @@ use ratatui::{
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
     let [messages_area, input_area] = areas(area);
-    render_messages(app, messages_area, frame.buffer_mut(), palette);
+    let transcript_area = super::commands::render_reply(frame, app, messages_area, palette);
+    render_messages(app, transcript_area, frame.buffer_mut(), palette);
     render_input(frame, app, input_area, palette);
+    super::commands::render_menu(frame, app, messages_area, palette);
 }
 
 pub(super) fn areas(area: Rect) -> [Rect; 2] {
@@ -38,11 +40,11 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
     let focused = input_is_focused(app);
     let hint = match app.settings.language {
         Lang::Zh => format!(
-            "{} 发送 · {} 换行 · Tab 侧栏",
+            "/ 命令 · {} 发送 · {} 换行 · Tab 侧栏",
             app.settings.keybindings.submit, app.settings.keybindings.newline
         ),
         Lang::En => format!(
-            "{} Send · {} Newline · Tab Sidebar",
+            "/ Commands · {} Send · {} Newline · Tab Sidebar",
             app.settings.keybindings.submit, app.settings.keybindings.newline
         ),
     };
@@ -106,6 +108,7 @@ pub(crate) fn input_is_focused(app: &App) -> bool {
     app.focus == Focus::Input
         && app.modal.is_none()
         && app.picker.is_none()
+        && app.commands.overlay.is_none()
         && app.conversation_overlay.is_none()
         && app.code_overlay.is_none()
         && app.activity_overlay.is_none()

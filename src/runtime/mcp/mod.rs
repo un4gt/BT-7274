@@ -252,6 +252,22 @@ impl McpRegistry {
         Ok(())
     }
 
+    /// Read connection state and callable tools under the same lock.
+    pub fn catalog_snapshot(&self) -> Vec<(McpServerSnapshot, Vec<ToolDefinition>)> {
+        self.lock_state()
+            .servers
+            .values()
+            .map(|entry| {
+                let tools = if entry.snapshot.status == McpServerStatus::Connected {
+                    entry.tools.clone()
+                } else {
+                    Vec::new()
+                };
+                (entry.snapshot.clone(), tools)
+            })
+            .collect()
+    }
+
     pub fn snapshots(&self) -> BTreeMap<String, McpServerSnapshot> {
         self.lock_state()
             .servers
@@ -921,6 +937,10 @@ mod tests {
         .unwrap();
         let tools = registry.tools();
         assert_eq!(tools.len(), 2);
+        let catalog = registry.catalog_snapshot();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].0.status, McpServerStatus::Connected);
+        assert_eq!(catalog[0].1, tools);
         let weather = tools
             .iter()
             .find(|tool| tool.remote_name == "weather.search")
@@ -944,6 +964,13 @@ mod tests {
             .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.output["content"][0]["text"], "sunny");
+        let mut disabled = http_config("fixture", format!("http://{address}/mcp"));
+        disabled.enabled = false;
+        registry.reconfigure(&[disabled], &ProxySettings::default());
+        let catalog = registry.catalog_snapshot();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].0.status, McpServerStatus::Disabled);
+        assert!(catalog[0].1.is_empty());
         registry.shutdown().await;
         server_shutdown.cancel();
         server_task.await.unwrap();

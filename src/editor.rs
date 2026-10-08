@@ -42,7 +42,6 @@ impl ChatEditor {
         &self.buffer
     }
 
-    #[cfg(test)]
     pub fn cursor(&self) -> usize {
         self.cursor
     }

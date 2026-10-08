@@ -42,6 +42,9 @@ cargo install --git https://github.com/un4gt/BT-7274 --locked
 | --- | --- |
 | `--version`、`-V` | 输出程序名和版本号后退出 |
 | `--help`、`-h` | 输出用法和可用参数后退出 |
+| `config` | 显示配置子命令帮助 |
+| `config show` | 打印配置文件路径和原始内容，文件不存在时创建默认配置 |
+| `config edit` | 通过系统默认应用打开配置文件，文件不存在时创建默认配置 |
 | 不带参数 | 启动交互式聊天界面 |
 
 版本号来自构建时的 `Cargo.toml`。帮助和版本查询的退出码为 `0`，无需 API Key，

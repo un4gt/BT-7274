@@ -3,6 +3,7 @@ use crate::config::Settings;
 use crate::runtime::conversation::Session;
 
 mod app;
+mod cli;
 mod clipboard;
 mod config;
 mod editor;
@@ -33,12 +34,11 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> color_eyre::Result<()> {
-    // Help, version and argument errors exit before runtime, logging or terminal setup.
-    clap::Command::new(env!("CARGO_PKG_NAME"))
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("终端 AI 聊天客户端")
-        .after_help("不带参数时启动交互式聊天界面。")
-        .get_matches();
+    // CLI commands exit before runtime, logging or terminal setup.
+    let matches = cli::command().get_matches();
+    if let Some(("config", args)) = matches.subcommand() {
+        return cli::run_config(args);
+    }
 
     run()
 }

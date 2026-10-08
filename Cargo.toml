@@ -1,6 +1,6 @@
 [package]
 name = "bt-7274"
-version = "0.3.0"
+version = "0.4.0"
 description = "A minimal terminal AI chat TUI (ratatui + async-openai)"
 authors = ["un4gt <mt3085570450@outlook.com>"]
 license = "MIT"
@@ -44,6 +44,10 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 # The Markdown renderer selects a BuiltinCodeTheme for each application theme.
 tui-markdown = { version = "0.3.9", default-features = false, features = ["highlight-code"] }
 unicode-segmentation = { version = "1.12", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+# Open config files through Windows associations, with an Open With dialog when needed.
+windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 # The MCP integration fixture runs a local HTTP server.

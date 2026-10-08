@@ -13,6 +13,22 @@ BT-7274 使用 TOML 配置。顶层 `whimsy` 支持运行时热更新，修改�
 | 会话 | `%APPDATA%\bt-7274\sessions\*.json` | `${XDG_DATA_HOME:-~/.local/share}/bt-7274/sessions/*.json` | `~/Library/Application Support/bt-7274/sessions/*.json` |
 | 日志 | `%USERPROFILE%\.bt7274\logs\YYYY-MM-DD.log` | `~/.bt7274/logs/YYYY-MM-DD.log` | `~/.bt7274/logs/YYYY-MM-DD.log` |
 
+## 命令行查看与编辑
+
+```shell
+bt-7274 config       # 查看子命令帮助
+bt-7274 config show  # 打印配置文件的完整路径和原始内容
+bt-7274 config edit  # 使用系统默认应用打开配置文件
+```
+
+文件不存在时，`show` 和 `edit` 会先创建配置目录并写入默认配置。已有文件直接读取或打开，
+保留注释、格式和环境变量引用；即使 TOML 尚未写完整或配置版本不兼容，也能用这些命令
+查看和修复，不会触发启动时的版本备份流程。
+
+Windows 使用 `.toml` 的默认关联应用；尚未设置时弹出“打开方式”窗口，可以选择一次打开
+或设置默认应用。macOS 使用系统 `open`，Linux 使用 `xdg-open`，需要可用的桌面环境和
+对应的文件关联。
+
 ## 最小 Gemini 配置
 
 ```toml

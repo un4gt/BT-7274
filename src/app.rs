@@ -1,5 +1,7 @@
 //! 应用状态机：焦点、输入、会话切换、流式生成、多供应商设置与模型切换。
 
+pub(crate) mod commands;
+
 use crate::clipboard;
 use crate::config::{
     ApiKind, KeyBinding, KeyBindings, McpServerConfig, ModelSelection, ModelSettings, Provider,
@@ -709,6 +711,7 @@ pub enum PickerMode {
 /// 模型快速切换弹窗（Alt+M 会话默认 / Ctrl+M 下一轮临时覆盖）。
 #[derive(Debug)]
 pub struct ModelPicker {
+    pub from_command: bool,
     pub mode: PickerMode,
     pub active: ModelSelection,
     /// 当前选中模型所属的供应商下标（Tab 可按供应商快速跳转）。
@@ -733,6 +736,7 @@ impl ModelPicker {
             .position(|model| *model == active.model)
             .unwrap_or(0);
         Self {
+            from_command: false,
             mode,
             active,
             provider_idx,
@@ -865,6 +869,7 @@ pub struct App {
     pub modal: Option<SettingsUi>,
     /// 打开中的模型切换弹窗。
     pub picker: Option<ModelPicker>,
+    pub(crate) commands: commands::CommandState,
     /// 全部会话，按 `updated_at` 倒序。
     pub sessions: Vec<Session>,
     /// 当前打开的会话下标。
@@ -936,6 +941,7 @@ impl App {
             settings,
             modal: None,
             picker: None,
+            commands: commands::CommandState::default(),
             current: 0,
             sessions,
             focus: Focus::default(),
@@ -1171,6 +1177,7 @@ impl App {
             && self.open_session().summary.is_none()
             && !self.generating()
             && self.notice().is_none()
+            && self.command_reply().is_none()
     }
 
     pub(crate) fn next_animation_frame(&self) -> Option<Instant> {
@@ -1212,6 +1219,7 @@ impl App {
         if self.error_detail.is_some()
             || self.activity_overlay.is_some()
             || self.code_overlay.is_some()
+            || self.commands.overlay.is_some()
         {
             return;
         }
@@ -1318,6 +1326,10 @@ impl App {
 
         if self.conversation_overlay.is_some() {
             self.handle_conversation_overlay_key(key_event);
+            return Ok(());
+        }
+        if self.commands.overlay.is_some() {
+            self.handle_command_overlay_key(key_event);
             return Ok(());
         }
         // 设置弹窗打开时独占按键
@@ -2278,41 +2290,19 @@ impl App {
 
     /// 发送输入框内容并启动流式生成。
     fn submit(&mut self) {
+        let text = self.editor.text().to_owned();
+        if self.execute_slash_command(&text) {
+            return;
+        }
         let texts = self.settings.language.texts();
         if self.generating() {
             self.set_current_notice(texts.notice_generating.to_owned());
             return;
         }
-        let text = self.editor.text().to_owned();
         if text.trim().is_empty() {
             return;
         }
         match text.trim() {
-            "/models" => {
-                self.editor.clear();
-                let active = self
-                    .open_session()
-                    .default_model
-                    .as_ref()
-                    .filter(|selection| self.settings.selection_available(selection))
-                    .cloned()
-                    .unwrap_or_else(|| self.settings.default_selection());
-                self.picker = Some(ModelPicker::new(
-                    &self.settings,
-                    active,
-                    PickerMode::SessionDefault,
-                ));
-                return;
-            }
-            "/mcp" => {
-                self.editor.clear();
-                let mut modal = SettingsUi::new(self.settings.clone());
-                modal.category = SettingsCategory::Mcp;
-                modal.pane = SettingsPane::Content;
-                modal.mcp_statuses = self.mcp_registry.snapshots();
-                self.modal = Some(modal);
-                return;
-            }
             "/compact" => {
                 self.editor.clear();
                 self.open_compaction_preview();
@@ -2588,6 +2578,7 @@ impl App {
         }
         self.sessions.remove(index);
         self.notices.remove(id);
+        self.commands.replies.remove(id);
         self.activity_overlay = None;
         if self
             .error_detail
@@ -2621,6 +2612,14 @@ impl App {
             self.mouse.borrow_mut().dragging_input = false;
             return false;
         }
+        if self.commands.overlay.is_some()
+            && self.error_detail.is_none()
+            && self.activity_overlay.is_none()
+            && self.code_overlay.is_none()
+            && self.conversation_overlay.is_none()
+        {
+            return self.handle_command_overlay_mouse(event);
+        }
         if !matches!(
             event.kind,
             MouseEventKind::Down(MouseButton::Left)
@@ -2651,6 +2650,14 @@ impl App {
             return false;
         };
         match target {
+            MouseTarget::SlashCommand(command)
+                if event.kind == MouseEventKind::Down(MouseButton::Left) =>
+            {
+                self.editor.clear();
+                self.editor.insert_text(command.name());
+                self.submit();
+            }
+            MouseTarget::CommandMenu | MouseTarget::SlashCommand(_) => return false,
             target @ (MouseTarget::ActivityList
             | MouseTarget::ActivityItem(_)
             | MouseTarget::ActivityDetail
@@ -2718,6 +2725,9 @@ impl App {
 
     /// 输入框焦点下的按键。
     fn handle_input_key(&mut self, key_event: KeyEvent) {
+        if self.handle_command_menu_key(key_event) {
+            return;
+        }
         let bindings = self.settings.keybindings.clone();
         let ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key_event.modifiers.contains(KeyModifiers::SHIFT);
@@ -2762,7 +2772,11 @@ impl App {
             KeyCode::Tab => self.focus_sidebar(),
             KeyCode::Char('p' | 'P') if ctrl => self.focus_sidebar(),
             KeyCode::Esc => {
-                self.editor.clear_selection();
+                if !self.editor.clear_selection() {
+                    self.commands
+                        .replies
+                        .remove(&self.open_session().id.clone());
+                }
             }
             KeyCode::Backspace => self.editor.backspace(ctrl),
             KeyCode::Delete => self.editor.delete(ctrl),
@@ -3777,6 +3791,9 @@ impl App {
                         }
                         self.persist_settings();
                         let selection = self.settings.providers[idx].selection(name);
+                        if picker.from_command {
+                            self.model_command_reply(&selection);
+                        }
                         self.apply_picker_selection(picker.mode, selection);
                     }
                     close = true;
@@ -3837,6 +3854,9 @@ impl App {
                     {
                         let selection =
                             self.settings.providers[picker.provider_idx].selection(name);
+                        if picker.from_command {
+                            self.model_command_reply(&selection);
+                        }
                         self.apply_picker_selection(picker.mode, selection);
                     }
                     close = true;
@@ -5021,31 +5041,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slash_models_and_mcp_open_existing_lists_without_sending_messages() {
+    async fn slash_commands_open_local_pickers_without_sending_messages() {
         let mut app = test_app();
         let original_messages = app.open_session().messages.len();
 
-        app.editor.set_text("/models");
-        app.submit();
-        assert!(app.editor.text().is_empty());
-        assert!(matches!(
-            app.picker.as_ref().map(|picker| picker.mode),
-            Some(PickerMode::SessionDefault)
-        ));
-        assert_eq!(app.open_session().messages.len(), original_messages);
+        for command in ["/model", "/models"] {
+            app.editor.set_text(command);
+            app.submit();
+            assert!(app.editor.text().is_empty());
+            let picker = app.picker.as_ref().unwrap();
+            assert!(matches!(picker.mode, PickerMode::SessionDefault));
+            assert!(picker.from_command);
+            assert_eq!(app.open_session().messages.len(), original_messages);
+        }
 
         app.picker = None;
+        app.editor.set_text("/effort");
+        app.submit();
+        assert!(matches!(
+            app.commands.overlay,
+            Some(commands::CommandOverlay::Effort(_))
+        ));
+        assert!(app.editor.text().is_empty());
+        assert_eq!(app.open_session().messages.len(), original_messages);
+
+        app.commands.overlay = None;
         app.editor.set_text("/mcp");
         app.submit();
         assert!(app.editor.text().is_empty());
+        assert!(app.modal.is_none());
         assert!(matches!(
-            app.modal.as_ref(),
-            Some(SettingsUi {
-                category: SettingsCategory::Mcp,
-                pane: SettingsPane::Content,
-                ..
-            })
+            app.commands.overlay,
+            Some(commands::CommandOverlay::Mcp { .. })
         ));
         assert_eq!(app.open_session().messages.len(), original_messages);
+        assert!(app.stream.is_none());
+        assert!(app.input_history().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_commands_work_while_generating_without_replacing_the_request() {
+        let mut app = test_app();
+        start_fake_stream(&mut app, "session-a/invalid", 7);
+        for command in ["/model", "/effort", "/mcp"] {
+            app.editor.set_text(command);
+            app.submit();
+            assert!(app.editor.text().is_empty());
+            assert_eq!(app.stream.as_ref().unwrap().id, 7);
+            assert!(!app.stream.as_ref().unwrap().cancellation.is_cancelled());
+            assert!(app.open_session().messages.is_empty());
+            app.picker = None;
+            app.commands.overlay = None;
+        }
     }
 }
