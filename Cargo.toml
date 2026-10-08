@@ -28,7 +28,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "r
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 # Settings are both deserialized and saved with to_string_pretty.
-toml = { version = "0.9", default-features = false, features = ["std", "serde", "parse", "display"] }
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse", "display"] }
 dirs = { version = "6.0", default-features = false }
 # File logs rotate by local date, so Local::now requires clock.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
